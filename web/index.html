@@ -62,6 +62,20 @@ header .sub { color: var(--muted); font-size: 13px; flex-basis: 100%; margin: 0;
 .drop .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plus { width: 36px; height: 36px; border-radius: 8px; border: 1px dashed var(--faint); display: grid; place-items: center; color: var(--muted); font-family: var(--mono); flex: none; }
 
+/* 영상 목록 */
+.srcs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.src { display: flex; align-items: center; gap: 12px; padding: 10px 0; min-width: 0; }
+.src + .src { border-top: 1px solid var(--line); }
+.src .no { font-family: var(--mono); font-size: 12px; color: var(--muted); width: 18px; text-align: right; flex: none; }
+.src .body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.src .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.src .mt { font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.src .acts { display: flex; gap: 4px; flex: none; }
+.icon { font: inherit; font-family: var(--mono); font-size: 13px; width: 32px; height: 32px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; }
+.icon:hover:not(:disabled) { color: var(--fg); border-color: var(--faint); }
+.icon:disabled { opacity: .3; cursor: default; }
+.icon:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 /* 모드 */
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; padding: 3px; gap: 3px; background: var(--card); align-self: flex-start; }
 .seg button { font: inherit; font-size: 13px; font-weight: 500; color: var(--muted); background: transparent; border: 0; border-radius: 6px; padding: 7px 14px; cursor: pointer; }
@@ -159,10 +173,17 @@ video { width: 100%; max-height: 52vh; background: #000; border-radius: 8px; dis
     <span class="plus">+</span>
     <span class="info">
       <span class="t name" id="fileName">영상 선택 또는 끌어다 놓기</span>
-      <span class="m num" id="fileMeta">mp4 · mov · 10분 이하 권장</span>
+      <span class="m num" id="fileMeta">여러 개 선택 가능 · mp4 · mov · 합쳐서 10분 이하 권장</span>
     </span>
-    <input type="file" id="file" accept="video/mp4,video/quicktime,video/*">
+    <input type="file" id="file" accept="video/mp4,video/quicktime,video/*" multiple>
   </label>
+
+  <div class="card" id="srcCard" hidden>
+    <div class="section">
+      <div class="row"><h2>영상</h2><span class="spacer"></span><span class="msg" id="srcHint">촬영 순서대로 이어 붙입니다</span></div>
+      <ol class="srcs" id="srcs"></ol>
+    </div>
+  </div>
 
   <div class="seg" role="group" aria-label="편집 방식">
     <button type="button" id="modeVlog" aria-pressed="true">브이로그 · 장면</button>
@@ -227,6 +248,7 @@ video { width: 100%; max-height: 52vh; background: #000; border-radius: 8px; dis
     <div class="section">
       <div class="row">
         <h2>미리보기</h2><span class="spacer"></span>
+        <span class="msg num" id="pvInfo"></span>
         <label class="toggle" for="skip"><input type="checkbox" id="skip" checked>편집본처럼 재생</label>
       </div>
       <video id="video" playsinline controls preload="metadata"></video>
@@ -270,19 +292,23 @@ const MIN_KEEP = 0.2;      // 토킹: 이보다 짧게 남는 조각은 버림
 const MIN_CLIP = 0.8;      // 브이로그: 이보다 짧은 샷은 쓰지 않음
 const EDGE = 0.2;          // 브이로그: 장면 전환 직후/직전은 피함
 const FADE = 0.015;        // 컷마다 오디오 페이드 (툭 소리 방지)
+const OUT_RATE = 48000;    // 출력 오디오 (여러 영상의 형식을 하나로)
+const MAX_SIDE = 1920;     // 여러 영상을 합칠 때 출력 긴 변 최대
 const MIN_STEP_MS = 500;   // 단계가 너무 빨리 지나가도 보이도록 최소 표시 시간
 const VIDEO_CODECS = window.__testVideoCodecs ?? ["avc", "hevc"];  // 테스트에서만 바꿈 (H.264 없는 Chromium)
 const SENS = { 1: ["낮음", 0.5], 2: ["보통", 0.35], 3: ["높음", 0.22] };
 
-const state = {
-  mode: "vlog", file: null, url: null, env: null, vis: null, shots: [], overrides: new Map(),
-  segments: [], busy: false, blob: null,
-};
+// sources: 편집에 쓰는 영상들, 배열 순서 = 이어 붙이는 순서
+const state = { mode: "vlog", sources: [], shots: [], overrides: new Map(), segments: [], busy: false, blob: null };
+let nextId = 1;
 
 // ---------- 표시 도우미 ----------
 const fmt = (s) => { s = Math.max(0, s); const m = Math.floor(s / 60); const r = Math.round(s - m * 60); return r === 60 ? `${m + 1}:00` : `${m}:${String(r).padStart(2, "0")}`; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const clamp01 = (x) => Math.max(0, Math.min(1, x));
+const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const ready = () => state.sources.filter((s) => s.env);
+const srcById = (id) => state.sources.find((s) => s.id === id);
 function step(k, status, right = "") {
   const li = document.querySelector(`.step[data-k="${k}"]`);
   li.className = "step" + (status ? " " + status : "");
@@ -298,7 +324,12 @@ async function timed(k, fn) {
   return [out, performance.now() - t0];
 }
 function setMsg(text, err = false) { $("msg").textContent = text; $("msg").className = "msg" + (err ? " err" : ""); }
-function setBusy(b) { state.busy = b; $("hdrDot").className = "dot" + (b ? " live" : state.blob ? " done" : ""); $("renderBtn").disabled = b || !state.env || !state.segments.length; }
+function setBusy(b) {
+  state.busy = b;
+  $("hdrDot").className = "dot" + (b ? " live" : state.blob ? " done" : "");
+  $("renderBtn").disabled = b || !state.segments.length;
+  document.querySelectorAll(".src .icon").forEach((x) => (x.disabled = b || x.dataset.off === "1"));
+}
 function percentile(arr, p) { const a = Array.from(arr).filter(Number.isFinite).sort((x, y) => x - y); return a.length ? a[Math.min(a.length - 1, Math.floor(p * a.length))] : 0; }
 
 let wakeLock = null;
@@ -315,15 +346,16 @@ async function analyzeAudio(file, report) {
   const duration = await input.computeDuration();
   const vt = await input.getPrimaryVideoTrack();
   const at = await input.getPrimaryAudioTrack();
-  let fps = 30, width = 0, height = 0;
-  if (vt) {
-    const stats = await vt.computePacketStats(120);
-    fps = stats.averagePacketRate || 30;
-    width = await vt.getDisplayWidth(); height = await vt.getDisplayHeight();
-  }
+  if (!vt) throw new Error(`${file.name}: 영상 트랙이 없습니다.`);
+  const stats = await vt.computePacketStats(120);
+  const fps = stats.averagePacketRate || 30;
+  const width = await vt.getDisplayWidth(), height = await vt.getDisplayHeight();
+  let date = null;
+  try { date = (await input.getMetadataTags()).date ?? null; } catch {}
   const n = Math.ceil(duration / WIN) + 1;
   const db = new Float32Array(n).fill(-100);
-  if (at && (await at.canDecode())) {
+  const hasAudio = !!at && (await at.canDecode());
+  if (hasAudio) {
     const sum = new Float64Array(n), cnt = new Uint32Array(n);
     const sink = new AudioSampleSink(at);
     let buf = new Float32Array(0), lastReport = 0;
@@ -337,35 +369,31 @@ async function analyzeAudio(file, report) {
         if (w >= 0 && w < n) { sum[w] += buf[i] * buf[i]; cnt[w]++; }
       }
       s.close();
-      if (t0 - lastReport > 1) { lastReport = t0; report(`${Math.min(99, Math.round(t0 / duration * 100))}%`); }
+      if (t0 - lastReport > 1) { lastReport = t0; report(Math.round(t0 / duration * 100)); }
     }
     for (let i = 0; i < n; i++) if (cnt[i]) db[i] = 10 * Math.log10(sum[i] / cnt[i] + 1e-12);
   }
-  return { db, duration, fps, width, height, hasVideo: !!vt, hasAudio: !!at };
+  return { db, duration, fps, width, height, date, hasAudio };
 }
 
 // ---------- 장면 분석: 초당 4프레임을 작게 줄여 색·선명도·움직임 측정 ----------
 async function analyzeVisual(file, env, report) {
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
   const vt = await input.getPrimaryVideoTrack();
-  if (!vt) throw new Error("영상 트랙이 없습니다.");
-  if (!(await vt.canDecode())) throw new Error("이 브라우저가 영상을 해독하지 못합니다.");
+  if (!(await vt.canDecode())) throw new Error(`${file.name}: 이 브라우저가 영상을 해독하지 못합니다.`);
   const start = await vt.getFirstTimestamp();
-  const landscape = env.width >= env.height;
-  const sink = new CanvasSink(vt, landscape ? { width: 96 } : { height: 96 });
+  const sink = new CanvasSink(vt, env.width >= env.height ? { width: 96 } : { height: 96 });
   const times = [];
   for (let t = Math.max(0, start); t < env.duration; t += VSTEP) times.push(t);
   const n = times.length;
-  const bright = new Float32Array(n), sharp = new Float32Array(n), sat = new Float32Array(n), motion = new Float32Array(n);
-  const hdiff = new Float32Array(n);
+  const bright = new Float32Array(n), sharp = new Float32Array(n), sat = new Float32Array(n), motion = new Float32Array(n), hdiff = new Float32Array(n);
   let prevY = null, prevH = null, i = 0, lastReport = 0;
   for await (const wc of sink.canvasesAtTimestamps(times)) {
     if (wc) {
       const { canvas } = wc;
       const w = canvas.width, h = canvas.height;
       const px = canvas.getContext("2d").getImageData(0, 0, w, h).data;
-      const Y = new Float32Array(w * h);
-      const H = new Float32Array(64);
+      const Y = new Float32Array(w * h), H = new Float32Array(64);
       let sb = 0, ss = 0;
       for (let p = 0, q = 0; q < Y.length; p += 4, q++) {
         const r = px[p], g = px[p + 1], b = px[p + 2];
@@ -381,8 +409,7 @@ async function analyzeVisual(file, env, report) {
         lap += Math.abs(4 * Y[k] - Y[k - 1] - Y[k + 1] - Y[k - w] - Y[k + w]);
       }
       for (let k = 0; k < 64; k++) H[k] /= Y.length;
-      bright[i] = sb / Y.length; sat[i] = ss / Y.length;
-      sharp[i] = lap / ((w - 2) * (h - 2));
+      bright[i] = sb / Y.length; sat[i] = ss / Y.length; sharp[i] = lap / ((w - 2) * (h - 2));
       if (prevY && prevY.length === Y.length) {
         let d = 0; for (let k = 0; k < Y.length; k++) d += Math.abs(Y[k] - prevY[k]);
         motion[i] = d / Y.length;
@@ -392,30 +419,31 @@ async function analyzeVisual(file, env, report) {
       prevY = Y; prevH = H;
     }
     i++;
-    if (times[i - 1] - lastReport > 2) { lastReport = times[i - 1]; report(`${Math.min(99, Math.round(i / n * 100))}%`); }
+    if (times[i - 1] - lastReport > 2) { lastReport = times[i - 1]; report(Math.round(i / n * 100)); }
   }
   return { times, bright, sharp, sat, motion, hdiff };
 }
 
-// ---------- 샷 나누기 + 점수 ----------
+// ---------- 샷 나누기 + 점수 (영상 하나 단위) ----------
 function frameScores(env, vis) {
   const { times, bright, sharp, sat, motion } = vis;
   const n = times.length;
   const sLo = percentile(sharp, 0.1), sHi = percentile(sharp, 0.9);
   const mHi = percentile(motion, 0.9) || 1e-6;
-  // 소리: 잡음 바닥(하위 20%) 대비 얼마나 큰가
-  const db = env.db, floor = percentile(db.filter((v) => v > -99), 0.2), loud = percentile(db.filter((v) => v > -99), 0.95);
-  const audio = new Float32Array(n), score = new Float32Array(n);
-  const flags = [];
+  const db = env.db, heard = db.filter((v) => v > -99);
+  const floor = percentile(heard, 0.2), loud = percentile(heard, 0.95);
+  const audio = new Float32Array(n), score = new Float32Array(n), flags = [];
   for (let i = 0; i < n; i++) {
     const a0 = Math.floor(times[i] / WIN), a1 = Math.min(db.length, Math.floor((times[i] + VSTEP) / WIN));
     let m = -100; for (let k = a0; k < a1; k++) if (db[k] > m) m = db[k];
     audio[i] = env.hasAudio && loud > floor ? clamp01((m - floor) / (loud - floor)) : 0;
     const s = clamp01((sharp[i] - sLo) / (sHi - sLo || 1e-6));
-    const mv = motion[i] / mHi;                       // 1 = 상위 10% 움직임
+    const mv = motion[i] / mHi;
     const mScore = mv <= 1 ? 0.35 + 0.65 * mv : Math.max(0, 1 - (mv - 1) * 1.5);
     const expo = bright[i] < 0.07 ? 0.1 : bright[i] < 0.15 ? 0.6 : bright[i] > 0.93 ? 0.5 : 1;
-    score[i] = (0.35 * s + 0.2 * mScore + 0.3 * audio[i] + 0.15 * clamp01(sat[i] * 2)) * expo;
+    // 오디오 없는 영상은 소리 비중을 빼고 나머지로 다시 맞춘다 (다른 영상보다 불리하지 않게)
+    const wA = env.hasAudio ? 0.3 : 0;
+    score[i] = (0.35 * s + 0.2 * mScore + wA * audio[i] + 0.15 * clamp01(sat[i] * 2)) / (0.7 + wA) * expo;
     flags.push({ dark: bright[i] < 0.1, blur: s < 0.12, shake: mv > 1.6 && s < 0.35, still: mv < 0.05 && audio[i] < 0.2 });
   }
   return { audio, score, flags };
@@ -423,30 +451,28 @@ function frameScores(env, vis) {
 
 function detectShots(vis, threshold) {
   const { times, hdiff } = vis;
-  const n = times.length;
-  const cuts = [0];
+  const n = times.length, cuts = [0];
   for (let i = 1; i < n; i++) {
-    let lo = Math.max(1, i - 8), hi = Math.min(n, i + 8), local = [];
-    for (let k = lo; k < hi; k++) if (k !== i) local.push(hdiff[k]);
+    const local = [];
+    for (let k = Math.max(1, i - 8); k < Math.min(n, i + 8); k++) if (k !== i) local.push(hdiff[k]);
     local.sort((a, b) => a - b);
     const med = local[Math.floor(local.length / 2)] || 0;
-    const since = times[i] - times[cuts[cuts.length - 1]];
-    if (hdiff[i] > threshold && hdiff[i] > 2.5 * med + 0.05 && since >= 1) cuts.push(i);
+    if (hdiff[i] > threshold && hdiff[i] > 2.5 * med + 0.05 && times[i] - times[cuts[cuts.length - 1]] >= 1) cuts.push(i);
   }
   return cuts;
 }
 
-function buildShots(env, vis, fs, opts) {
+function buildShots(src, opts) {
+  const { env, vis, fs } = src;
   const { times } = vis;
   const starts = detectShots(vis, SENS[opts.sens][1]);
   const shots = [];
   for (let k = 0; k < starts.length; k++) {
-    const i0 = starts[k], i1 = k + 1 < starts.length ? starts[k + 1] : times.length;
-    const a = times[i0], b = k + 1 < starts.length ? times[i1] : env.duration;
+    const i0 = starts[k], last = k + 1 >= starts.length, i1 = last ? times.length : starts[k + 1];
+    const a = k === 0 ? 0 : times[i0], b = last ? env.duration : times[i1];
     const idx = []; for (let i = i0; i < i1; i++) idx.push(i);
-    const mean = (f) => idx.reduce((t, i) => t + f(i), 0) / idx.length;
     const frac = (key) => idx.filter((i) => fs.flags[i][key]).length / idx.length;
-    const avg = mean((i) => fs.score[i]);
+    const avg = idx.reduce((t, i) => t + fs.score[i], 0) / idx.length;
     const speech = idx.filter((i) => fs.audio[i] > 0.45).length * VSTEP;
     const tags = [];
     if (frac("dark") > 0.5) tags.push("어두움");
@@ -455,9 +481,8 @@ function buildShots(env, vis, fs, opts) {
     if (frac("still") > 0.7) tags.push("정지");
     const talky = speech >= 1.5 && speech / (b - a) > 0.35;
     if (talky) tags.push("말소리");
-
-    // 샷 안에서 가장 좋은 구간 찾기 (앞뒤 전환부 EDGE 는 피함)
-    const lo = a + (k > 0 ? EDGE : 0), hi = b - (k + 1 < starts.length ? EDGE : 0);
+    // 샷 안에서 가장 좋은 구간 (앞뒤 전환부 EDGE 는 피함)
+    const lo = a + (k > 0 ? EDGE : 0), hi = b - (last ? 0 : EDGE);
     let len = Math.min(opts.maxClip, hi - lo);
     if (opts.speech && talky) len = Math.min(hi - lo, Math.max(len, Math.min(15, speech + 1)));
     let best = lo, bestV = -1;
@@ -470,48 +495,46 @@ function buildShots(env, vis, fs, opts) {
     }
     let bestFrame = idx[0], bf = -1;
     for (const i of idx) if (fs.score[i] > bf) { bf = fs.score[i]; bestFrame = i; }
-    const bad = tags.some((t) => t === "어두움" || t === "흐림" || t === "흔들림");
-    shots.push({ i: k, a, b, clipA: best, clipB: Math.min(hi, best + len), score: avg, tags, bad, talky, thumbT: times[bestFrame], auto: false, used: false });
+    const bad = tags.includes("어두움") || tags.includes("흐림") || tags.includes("흔들림");
+    shots.push({ id: `${src.id}:${k}`, src: src.id, a, b, clipA: best, clipB: Math.min(hi, best + len), score: avg, tags, bad, talky, thumbT: times[bestFrame] });
   }
   return shots;
 }
 
-function selectShots(env, shots, opts, overrides) {
-  const target = env.duration * opts.target / 100;
-  for (const s of shots) s.auto = false;
-  const pool = shots.filter((s) => !s.bad && s.clipB - s.clipA >= MIN_CLIP && overrides.get(s.i) !== "out");
-  pool.sort((x, y) => y.score - x.score);
-  let total = shots.filter((s) => overrides.get(s.i) === "in").reduce((t, s) => t + (s.clipB - s.clipA), 0);
-  for (const s of shots) { s.useA = s.clipA; s.useB = s.clipB; }
+// ---------- 컷 결정 ----------
+// 모든 영상의 샷을 한데 모아 점수순으로 목표 길이까지 채우고, 촬영 순서대로 이어 붙인다
+function selectShots(shots, total, opts, overrides) {
+  const target = total * opts.target / 100;
+  for (const s of shots) { s.auto = false; s.useA = s.clipA; s.useB = s.clipB; }
+  const forced = shots.filter((s) => overrides.get(s.id) === "in");
+  let sum = forced.reduce((t, s) => t + (s.clipB - s.clipA), 0);
+  const pool = shots.filter((s) => !s.bad && s.clipB - s.clipA >= MIN_CLIP && !overrides.has(s.id)).sort((x, y) => y.score - x.score);
   for (const s of pool) {
-    if (overrides.get(s.i) === "in") continue;
-    const d = s.clipB - s.clipA, left = target - total;
-    if (d <= left || total === 0) { s.auto = true; total += d; continue; }
-    // 목표까지 남은 시간이 충분하면 이 샷을 줄여서라도 채운다
-    if (left >= 1.5) { s.auto = true; s.useB = s.clipA + left; total += left; }
+    const d = s.clipB - s.clipA, left = target - sum;
+    if (d <= left || sum === 0) { s.auto = true; sum += d; continue; }
+    if (left >= 1.5) { s.auto = true; s.useB = s.clipA + left; sum += left; }  // 줄여서라도 목표를 채운다
   }
-  // 점수 상위 25% 는 하이라이트 표시
   const cut = percentile(shots.map((s) => s.score), 0.75);
   for (const s of shots) {
-    const o = overrides.get(s.i);
+    const o = overrides.get(s.id);
     s.used = o === "in" ? true : o === "out" ? false : s.auto;
     s.highlight = !s.bad && s.score >= cut;
   }
-  const snap = (t) => Math.round(t * env.fps) / env.fps;
   const segs = [];
   let out = 0;
   for (const s of shots) {
     if (!s.used) continue;
-    const a = snap(s.useA), b = Math.min(snap(s.useB), env.duration);
+    const fps = srcById(s.src).env.fps, snap = (t) => Math.round(t * fps) / fps;
+    const a = snap(s.useA), b = Math.min(snap(s.useB), srcById(s.src).env.duration);
     if (b - a < 0.1) continue;
-    segs.push({ a, b, o: out }); out += b - a;
+    segs.push({ src: s.src, a, b, o: out }); out += b - a;
   }
   return { segments: segs, outDuration: out };
 }
 
-// ---------- 토킹: 무음 감지 → 남길 구간 ----------
-function detectSilence(env, thr, minSil, pad) {
-  const { db, duration, fps } = env;
+// 토킹: 영상마다 무음을 빼고 이어 붙인다
+function detectSilence(src, thr, minSil, pad, o0) {
+  const { db, duration, fps } = src.env;
   const silences = [];
   let start = -1;
   for (let i = 0; i <= db.length; i++) {
@@ -533,17 +556,17 @@ function detectSilence(env, thr, minSil, pad) {
   let cur = 0;
   for (const [s, e] of cuts) { if (s - cur >= MIN_KEEP) keep.push([cur, s]); cur = Math.max(cur, e); }
   if (duration - cur >= MIN_KEEP) keep.push([cur, duration]);
-  let out = 0;
+  let out = o0;
   const segments = [];
   for (const [a0, b0] of keep) {
     const a = snap(a0), b = Math.min(snap(b0), duration);
     if (b - a <= 0) continue;
-    segments.push({ a, b, o: out }); out += b - a;
+    segments.push({ src: src.id, a, b, o: out }); out += b - a;
   }
-  return { segments, outDuration: out };
+  return { segments, out };
 }
 
-// ---------- 렌더링: 남길 구간만 이어 붙여 새 MP4 ----------
+// ---------- 렌더링 ----------
 function fadeAudio(x, seg) {
   const t0 = x.timestamp, t1 = t0 + x.duration;
   if (t0 >= seg.a + FADE && t1 <= seg.b - FADE) return x;
@@ -551,8 +574,7 @@ function fadeAudio(x, seg) {
   const data = new Float32Array(n * ch);
   for (let c = 0; c < ch; c++) x.copyTo(data.subarray(c * n, (c + 1) * n), { planeIndex: c, format: "f32-planar" });
   for (let i = 0; i < n; i++) {
-    const t = t0 + i / sr;
-    const g = Math.min(1, (t - seg.a) / FADE, (seg.b - t) / FADE);
+    const t = t0 + i / sr, g = Math.min(1, (t - seg.a) / FADE, (seg.b - t) / FADE);
     if (g < 1) { const gg = Math.max(0, g); for (let c = 0; c < ch; c++) data[c * n + i] *= gg; }
   }
   const y = new AudioSample({ data, format: "f32-planar", numberOfChannels: ch, sampleRate: sr, timestamp: t0 });
@@ -560,38 +582,103 @@ function fadeAudio(x, seg) {
   return y;
 }
 
-async function render(file, segments, env, report) {
-  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
-  const vt = await input.getPrimaryVideoTrack();
-  const at = await input.getPrimaryAudioTrack();
+// 영상마다 다른 오디오 형식(모노/스테레오, 44.1k/48k)을 48kHz 스테레오로 맞춘다.
+// 구간 하나를 이어서 변환하므로 조각 사이에 끊김이 없다 (선형 보간).
+class ToStereo48k {
+  constructor(t0) { this.t0 = t0; this.out = 0; this.pos = 0; this.pl = 0; this.pr = 0; }
+  convert(x) {
+    const n = x.numberOfFrames, ch = x.numberOfChannels, sr = x.sampleRate;
+    const L = new Float32Array(n), R = new Float32Array(n);
+    x.copyTo(L, { planeIndex: 0, format: "f32-planar" });
+    if (ch > 1) x.copyTo(R, { planeIndex: 1, format: "f32-planar" }); else R.set(L);
+    x.close();
+    let oL, oR;
+    if (sr === OUT_RATE) { oL = L; oR = R; }
+    else {
+      const stepIn = sr / OUT_RATE, cap = Math.ceil((n + 1) / stepIn) + 2;
+      oL = new Float32Array(cap); oR = new Float32Array(cap);
+      let m = 0;
+      while (this.pos < n - 1) {
+        const i = Math.floor(this.pos), f = this.pos - i;
+        const l0 = i < 0 ? this.pl : L[i], r0 = i < 0 ? this.pr : R[i];
+        oL[m] = l0 + (L[i + 1] - l0) * f; oR[m] = r0 + (R[i + 1] - r0) * f;
+        m++; this.pos += stepIn;
+      }
+      this.pos -= n; this.pl = L[n - 1]; this.pr = R[n - 1];
+      oL = oL.subarray(0, m); oR = oR.subarray(0, m);
+    }
+    if (!oL.length) return null;
+    const data = new Float32Array(oL.length * 2);
+    data.set(oL, 0); data.set(oR, oL.length);
+    const y = new AudioSample({ data, format: "f32-planar", numberOfChannels: 2, sampleRate: OUT_RATE, timestamp: this.t0 + this.out / OUT_RATE });
+    this.out += oL.length;
+    return y;
+  }
+}
+
+// 오디오가 없는 영상 구간은 무음으로 채워 영상과 소리가 어긋나지 않게 한다
+function* silenceSamples(o, dur) {
+  for (let t = 0; t < dur - 1e-6; t += 1) {
+    const d = Math.min(1, dur - t), n = Math.round(d * OUT_RATE);
+    if (n > 0) yield new AudioSample({ data: new Float32Array(n * 2), format: "f32-planar", numberOfChannels: 2, sampleRate: OUT_RATE, timestamp: o + t });
+  }
+}
+
+// 여러 영상을 합칠 때의 출력 규격: 많이 쓰인 방향, 그 방향에서 가장 큰 해상도(긴 변 1920 이하)
+function outputSpec(srcs) {
+  const portrait = srcs.filter((s) => s.env.height > s.env.width).length > srcs.length / 2;
+  const same = srcs.filter((s) => (s.env.height > s.env.width) === portrait);
+  const big = same.reduce((m, s) => (s.env.width * s.env.height > m.env.width * m.env.height ? s : m), same[0]);
+  let w = big.env.width, h = big.env.height;
+  const k = Math.min(1, MAX_SIDE / Math.max(w, h));
+  w = Math.round(w * k / 2) * 2; h = Math.round(h * k / 2) * 2;
+  const fps = [24, 25, 30, 50, 60].reduce((b, f) => (Math.abs(f - srcs[0].env.fps) < Math.abs(b - srcs[0].env.fps) ? f : b), 30);
+  return { width: w, height: h, fps };
+}
+
+async function render(segments, report) {
+  const used = [...new Set(segments.map((s) => s.src))].map(srcById);
+  const multi = used.length > 1;
+  const tracks = new Map();
+  for (const s of used) {
+    const input = new Input({ source: new BlobSource(s.file), formats: ALL_FORMATS });
+    const vt = await input.getPrimaryVideoTrack();
+    const at = s.env.hasAudio ? await input.getPrimaryAudioTrack() : null;
+    tracks.set(s.id, { vt, at, vsink: new VideoSampleSink(vt), asink: at ? new AudioSampleSink(at) : null });
+  }
   const output = new Output({ format: new Mp4OutputFormat({ fastStart: "in-memory" }), target: new BufferTarget() });
   const total = segments.reduce((t, s) => t + (s.b - s.a), 0);
   let vDone = 0, aDone = 0;
-  const tick = () => report(`${Math.min(99, Math.floor(Math.min(vt ? vDone : total, at ? aDone : total) / total * 100))}%`);
+  const tick = () => report(`${Math.min(99, Math.floor(Math.min(vDone, aDone) / total * 100))}%`);
 
-  let vsrc = null, asrc = null;
-  if (vt) {
-    const width = await vt.getCodedWidth(), height = await vt.getCodedHeight();
+  const first = tracks.get(used[0].id).vt;
+  let vsrc, spec = null;
+  if (multi) {
+    // 해상도·방향이 다른 영상: 회전을 화면에 반영하고 한 크기에 맞춰 여백으로 채움
+    spec = outputSpec(used);
+    const codec = await getFirstEncodableVideoCodec(VIDEO_CODECS, { width: spec.width, height: spec.height });
+    if (!codec) throw new Error("이 기기에서 H.264/HEVC 인코딩을 지원하지 않습니다.");
+    vsrc = new VideoSampleSource({ codec, quality: QUALITY_HIGH, keyFrameInterval: 1, sizeChangeBehavior: "contain",
+      transform: { width: spec.width, height: spec.height, frameRate: spec.fps, force: true } });
+    output.addVideoTrack(vsrc, { frameRate: spec.fps });
+  } else {
+    const width = await first.getCodedWidth(), height = await first.getCodedHeight();
     const codec = await getFirstEncodableVideoCodec(VIDEO_CODECS, { width, height });
     if (!codec) throw new Error("이 기기에서 H.264/HEVC 인코딩을 지원하지 않습니다.");
     vsrc = new VideoSampleSource({ codec, quality: QUALITY_HIGH, keyFrameInterval: 1 });
-    output.addVideoTrack(vsrc, { rotation: await vt.getRotation(), frameRate: env.fps });
+    output.addVideoTrack(vsrc, { rotation: await first.getRotation(), frameRate: used[0].env.fps });
   }
-  if (at) {
-    const numberOfChannels = await at.getNumberOfChannels(), sampleRate = await at.getSampleRate();
-    if (!(await canEncodeAudio("aac", { numberOfChannels, sampleRate }))) {
-      const { registerAacEncoder } = await import("@mediabunny/aac-encoder");
-      registerAacEncoder();
-    }
-    asrc = new AudioSampleSource({ codec: "aac", quality: QUALITY_HIGH });
-    output.addAudioTrack(asrc);
+  if (!(await canEncodeAudio("aac", { numberOfChannels: 2, sampleRate: OUT_RATE }))) {
+    const { registerAacEncoder } = await import("@mediabunny/aac-encoder");
+    registerAacEncoder();
   }
+  const asrc = new AudioSampleSource({ codec: "aac", quality: QUALITY_HIGH });
+  output.addAudioTrack(asrc);
   await output.start();
 
   const videoPump = async () => {
-    const sink = new VideoSampleSink(vt);
     for (const seg of segments) {
-      for await (const s of sink.samples(seg.a, seg.b)) {
+      for await (const s of tracks.get(seg.src).vsink.samples(seg.a, seg.b)) {
         const st = Math.max(seg.a, s.timestamp), en = Math.min(seg.b, s.timestamp + s.duration);
         if (en <= st) { s.close(); continue; }
         s.setTimestamp(seg.o + (st - seg.a));
@@ -604,8 +691,14 @@ async function render(file, segments, env, report) {
     vsrc.close();
   };
   const audioPump = async () => {
-    const sink = new AudioSampleSink(at);
     for (const seg of segments) {
+      const sink = tracks.get(seg.src).asink;
+      if (!sink) {
+        for (const x of silenceSamples(seg.o, seg.b - seg.a)) { await asrc.add(x); x.close(); }
+        aDone = seg.o + seg.b - seg.a; tick();
+        continue;
+      }
+      const conv = new ToStereo48k(seg.o);
       for await (const s of sink.samples(seg.a, seg.b)) {
         const sr = s.sampleRate;
         const from = Math.max(0, Math.round((seg.a - s.timestamp) * sr));
@@ -613,22 +706,22 @@ async function render(file, segments, env, report) {
         if (to <= from) { s.close(); continue; }
         let x = s;
         if (from > 0 || to < s.numberOfFrames) { x = s.trim(from, to); s.close(); }
-        x = fadeAudio(x, seg);
-        x.setTimestamp(seg.o + Math.max(0, x.timestamp - seg.a));
-        await asrc.add(x);
-        x.close();
-        aDone = x.timestamp + x.duration; tick();
+        const y = conv.convert(fadeAudio(x, seg));
+        if (!y) continue;
+        await asrc.add(y);
+        aDone = y.timestamp + y.duration; y.close(); tick();
       }
     }
     asrc.close();
   };
-  await Promise.all([vt ? videoPump() : null, at ? audioPump() : null]);
+  await Promise.all([videoPump(), audioPump()]);
   await output.finalize();
-  return new Blob([output.target.buffer], { type: "video/mp4" });
+  return { blob: new Blob([output.target.buffer], { type: "video/mp4" }), spec };
 }
 
-// ---------- 타임라인 그리기 ----------
+// ---------- 타임라인 (여러 영상을 이어 붙인 전체 시간) ----------
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+function offsets(srcs) { const m = new Map(); let t = 0; for (const s of srcs) { m.set(s.id, t); t += s.env.duration; } return [m, t]; }
 function canvasCtx() {
   const cv = $("wave"), dpr = window.devicePixelRatio || 1;
   const w = cv.clientWidth, h = cv.clientHeight;
@@ -638,90 +731,112 @@ function canvasCtx() {
   g.clearRect(0, 0, w, h);
   return [g, w, h];
 }
-function drawTalk(env) {
+function drawSeams(g, srcs, off, D, w, h) {
+  g.fillStyle = css("--fg"); g.font = `11px ${css("--mono")}`; g.textBaseline = "top";
+  srcs.forEach((s, k) => {
+    const x = Math.round(off.get(s.id) / D * w);
+    if (k > 0) { g.globalAlpha = 0.5; g.fillRect(x, 0, 1, h); }
+    if (srcs.length > 1) { g.globalAlpha = 0.6; g.fillText(String(k + 1), x + 4, 2); }
+  });
+  g.globalAlpha = 1;
+}
+function drawTalk(srcs, segments, thr) {
   const [g, w, h] = canvasCtx();
-  const { db, duration } = env;
+  const [off, D] = offsets(srcs);
   const y = (v) => h - 4 - (Math.min(0, Math.max(-70, v)) + 70) / 70 * (h - 8);
-  g.fillStyle = css("--line");
-  let cur = 0;
-  for (const s of state.segments) { if (s.a > cur) g.fillRect(cur / duration * w, 0, (s.a - cur) / duration * w, h); cur = s.b; }
-  if (cur < duration) g.fillRect(cur / duration * w, 0, (duration - cur) / duration * w, h);
+  g.fillStyle = css("--line"); g.fillRect(0, 0, w, h);
+  g.fillStyle = css("--card");
+  for (const s of segments) { const o = off.get(s.src); g.fillRect((o + s.a) / D * w, 0, (s.b - s.a) / D * w, h); }
   g.fillStyle = css("--fg"); g.globalAlpha = 0.85;
-  const per = db.length / w;
   for (let x = 0; x < w; x++) {
-    let m = -100; const s = Math.floor(x * per), e = Math.max(s + 1, Math.floor((x + 1) * per));
-    for (let i = s; i < e && i < db.length; i++) if (db[i] > m) m = db[i];
+    const t0 = x / w * D, t1 = (x + 1) / w * D;
+    let m = -100;
+    for (const s of srcs) {
+      const o = off.get(s.id), d = s.env.duration;
+      if (t1 <= o || t0 >= o + d) continue;
+      const i0 = Math.max(0, Math.floor((t0 - o) / WIN)), i1 = Math.min(s.env.db.length, Math.ceil((t1 - o) / WIN));
+      for (let i = i0; i < i1; i++) if (s.env.db[i] > m) m = s.env.db[i];
+    }
     const top = y(m); g.fillRect(x, top, 1, h - 4 - top);
   }
   g.globalAlpha = 1; g.fillStyle = css("--accent");
-  g.fillRect(0, Math.round(y(+$("thr").value)), w, 1);
+  g.fillRect(0, Math.round(y(thr)), w, 1);
+  drawSeams(g, srcs, off, D, w, h);
 }
-function drawVlog(env, shots, scoreLine) {
+function drawVlog(srcs, shots) {
   const [g, w, h] = canvasCtx();
-  const D = env.duration, X = (t) => t / D * w;
+  const [off, D] = offsets(srcs);
+  const X = (s, t) => (off.get(s) + t) / D * w;
   const bandTop = h - 22, bandH = 14;
-  // 샷 띠: 번갈아 칠해서 경계가 보이게
   shots.forEach((s, k) => {
     g.fillStyle = k % 2 ? "#1e1e1e" : "#262626";
-    g.fillRect(X(s.a), bandTop, Math.max(1, X(s.b) - X(s.a) - 1), bandH);
-    if (s.used) { const ua = s.useA ?? s.clipA, ub = s.useB ?? s.clipB; g.fillStyle = css("--accent"); g.fillRect(X(ua), bandTop, Math.max(2, X(ub) - X(ua)), bandH); }
+    g.fillRect(X(s.src, s.a), bandTop, Math.max(1, X(s.src, s.b) - X(s.src, s.a) - 1), bandH);
+    if (s.used) { g.fillStyle = css("--accent"); g.fillRect(X(s.src, s.useA), bandTop, Math.max(2, X(s.src, s.useB) - X(s.src, s.useA)), bandH); }
   });
-  // 점수 곡선
-  if (scoreLine) {
-    const { times, score } = scoreLine;
-    g.strokeStyle = css("--fg"); g.globalAlpha = 0.8; g.lineWidth = 1; g.beginPath();
-    for (let i = 0; i < times.length; i++) {
-      const px = X(times[i]), py = 6 + (1 - score[i]) * (bandTop - 16);
-      i ? g.lineTo(px, py) : g.moveTo(px, py);
-    }
-    g.stroke(); g.globalAlpha = 1;
+  g.strokeStyle = css("--fg"); g.globalAlpha = 0.8; g.lineWidth = 1;
+  for (const s of srcs) {
+    if (!s.vis) continue;
+    g.beginPath();
+    s.vis.times.forEach((t, i) => { const px = X(s.id, t), py = 14 + (1 - s.fs.score[i]) * (bandTop - 22); i ? g.lineTo(px, py) : g.moveTo(px, py); });
+    g.stroke();
   }
-  // 장면 경계 눈금
+  g.globalAlpha = 1;
   g.fillStyle = css("--faint");
-  for (const s of shots) if (s.a > 0) g.fillRect(Math.round(X(s.a)), 0, 1, bandTop - 4);
+  for (const s of shots) if (s.a > 0) g.fillRect(Math.round(X(s.src, s.a)), 14, 1, bandTop - 18);
+  drawSeams(g, srcs, off, D, w, h);
 }
 function setLegend() {
+  const seam = state.sources.length > 1 ? '<span><i style="background:var(--fg);opacity:.5;height:8px;width:1px"></i>영상 경계</span>' : "";
   $("legend").innerHTML = state.mode === "vlog"
-    ? '<span><i style="background:var(--fg)"></i>장면 점수</span><span><i style="background:var(--faint);height:8px;width:1px"></i>장면 전환</span><span><i style="background:var(--accent);height:8px"></i>남길 구간</span>'
-    : '<span><i style="background:var(--fg)"></i>음량</span><span><i style="background:var(--accent)"></i>무음 기준선</span><span><i style="background:var(--faint);height:8px"></i>잘릴 구간</span>';
+    ? `<span><i style="background:var(--fg)"></i>장면 점수</span><span><i style="background:var(--faint);height:8px;width:1px"></i>장면 전환</span><span><i style="background:var(--accent);height:8px"></i>남길 구간</span>${seam}`
+    : `<span><i style="background:var(--fg)"></i>음량</span><span><i style="background:var(--accent)"></i>무음 기준선</span><span><i style="background:var(--line);height:8px"></i>잘릴 구간</span>${seam}`;
 }
 
-// 파일을 고르기 전에 보여줄 예시
+// 영상을 고르기 전에 보여줄 예시 (영상 3개를 이어 붙인 모양)
 const example = (() => {
-  const D = 96; let seed = 11; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
-  const shots = []; let t = 0, k = 0;
-  while (t < D) {
-    const len = Math.min(D - t, 2 + rnd() * 9);
-    const clipLen = Math.min(len - 0.4, 4);
-    const ca = t + 0.2 + rnd() * Math.max(0, len - clipLen - 0.4);
-    shots.push({ i: k++, a: t, b: t + len, clipA: ca, clipB: ca + clipLen, score: rnd(), used: false });
-    t += len;
-  }
-  const times = [], score = [];
-  for (let x = 0; x < D; x += VSTEP) { const s = shots.find((q) => x < q.b); times.push(x); score.push(clamp01(s.score * 0.7 + 0.3 * Math.sin(x * 1.7) * 0.5 + 0.15)); }
+  let seed = 11; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const srcs = [], shots = [];
+  [38, 26, 32].forEach((D, k) => {
+    const id = -(k + 1);
+    const times = [], score = [];
+    const my = []; let t = 0, j = 0;
+    while (t < D) {
+      const len = Math.min(D - t, 2 + rnd() * 8), cl = Math.min(len - 0.4, 4);
+      const ca = t + 0.2 + rnd() * Math.max(0, len - cl - 0.4);
+      my.push({ id: `${id}:${j++}`, src: id, a: t, b: t + len, clipA: ca, clipB: ca + cl, useA: ca, useB: ca + cl, score: rnd(), used: false });
+      t += len;
+    }
+    for (let x = 0; x < D; x += VSTEP) { const s = my.find((q) => x < q.b); times.push(x); score.push(clamp01(s.score * 0.7 + 0.12 * Math.sin(x * 1.7) + 0.15)); }
+    const db = new Float32Array(Math.ceil(D / WIN));
+    let p = 0, speak = true;
+    while (p < db.length) { const L = Math.floor((speak ? 2 + rnd() * 5 : 0.3 + rnd() * 2) / WIN); for (let i = p; i < Math.min(db.length, p + L); i++) db[i] = speak ? -24 + rnd() * 16 : -58 + rnd() * 8; p += L; speak = !speak; }
+    srcs.push({ id, env: { duration: D, db, fps: 30 }, vis: { times }, fs: { score } });
+    shots.push(...my);
+  });
   [...shots].sort((a, b) => b.score - a.score).slice(0, Math.ceil(shots.length * 0.45)).forEach((s) => (s.used = true));
-  const out = shots.filter((s) => s.used).reduce((t, s) => t + s.clipB - s.clipA, 0);
-  const db = new Float32Array(Math.ceil(D / WIN));
-  let p = 0, speak = true;
-  while (p < db.length) { const L = Math.floor((speak ? 2 + rnd() * 5 : 0.3 + rnd() * 2) / WIN); for (let i = p; i < Math.min(db.length, p + L); i++) db[i] = speak ? -24 + rnd() * 16 : -58 + rnd() * 8; p += L; speak = !speak; }
-  return { env: { duration: D, db, fps: 30 }, shots, scoreLine: { times, score }, out };
+  return { srcs, shots, out: shots.filter((s) => s.used).reduce((t, s) => t + s.clipB - s.clipA, 0) };
 })();
 
-function showStats(duration, out, usedK, usedV, usedD) {
-  $("sSrc").textContent = fmt(duration); $("sSrcD").textContent = `${duration.toFixed(1)} s`;
-  $("sOut").textContent = fmt(out); $("sOutD").textContent = `${out.toFixed(1)} s · ${Math.round(out / duration * 100)}%`;
-  $("sCutK").textContent = usedK; $("sCut").textContent = usedV; $("sCutD").textContent = usedD;
+function showStats(duration, out, k, v, d, srcLine) {
+  $("sSrc").textContent = fmt(duration); $("sSrcD").textContent = srcLine;
+  $("sOut").textContent = fmt(out); $("sOutD").textContent = `${out.toFixed(1)} s · ${duration ? Math.round(out / duration * 100) : 0}%`;
+  $("sCutK").textContent = k; $("sCut").textContent = v; $("sCutD").textContent = d;
 }
-
 function vlogOpts() { return { target: +$("target").value, maxClip: +$("maxClip").value, sens: +$("sens").value, speech: $("speech").checked }; }
 
-// 샷 나누기는 민감도가 바뀔 때만, 선택은 매번 다시
-let fsCache = null;
-function rebuildShots() {
-  if (!state.vis) return;
-  fsCache = fsCache || frameScores(state.env, state.vis);
-  state.shots = buildShots(state.env, state.vis, fsCache, vlogOpts());
-  state.overrides.clear();
+// 샷 목록을 다시 만든다 (민감도·샷 길이가 바뀌었거나 영상이 추가/삭제/이동됐을 때)
+function rebuildShots({ keepOverrides = true } = {}) {
+  const opts = vlogOpts();
+  const shots = [];
+  for (const s of state.sources) {
+    if (!s.vis) continue;
+    s.fs = s.fs || frameScores(s.env, s.vis);
+    s.shots = buildShots(s, opts);
+    shots.push(...s.shots);
+  }
+  state.shots = shots;
+  if (!keepOverrides) state.overrides.clear();
+  for (const id of [...state.overrides.keys()]) if (!shots.some((s) => s.id === id)) state.overrides.delete(id);
   renderShotGrid();
 }
 
@@ -734,61 +849,100 @@ function recompute() {
   $("sensV").textContent = SENS[$("sens").value][0];
   setLegend();
 
-  if (!state.env) {  // 예시 화면
+  const srcs = ready();
+  if (!srcs.length) {  // 예시 화면
+    const D = example.srcs.reduce((t, s) => t + s.env.duration, 0);
     if (state.mode === "vlog") {
-      drawVlog(example.env, example.shots, example.scoreLine);
-      const used = example.shots.filter((s) => s.used).length;
-      showStats(example.env.duration, example.out, "사용한 장면", `${used}/${example.shots.length}`, "예시 데이터");
+      drawVlog(example.srcs, example.shots);
+      showStats(D, example.out, "사용한 장면", `${example.shots.filter((s) => s.used).length}/${example.shots.length}`, "예시 데이터", "영상 3개 · 예시");
     } else {
-      const r = detectSilence(example.env, +$("thr").value, +$("minSil").value, +$("pad").value);
-      state.segments = r.segments; drawTalk(example.env);
-      showStats(example.env.duration, r.outDuration, "잘린 무음", `${Math.max(0, r.segments.length - 1)}곳`, "예시 데이터");
-      state.segments = [];
+      let o = 0; const segs = [];
+      for (const s of example.srcs) { const r = detectSilence(s, +$("thr").value, +$("minSil").value, +$("pad").value, o); segs.push(...r.segments); o = r.out; }
+      drawTalk(example.srcs, segs, +$("thr").value);
+      showStats(D, o, "남긴 조각", `${segs.length}개`, "예시 데이터", "영상 3개 · 예시");
     }
     return;
   }
-
+  const D = srcs.reduce((t, s) => t + s.env.duration, 0);
+  const srcLine = `${D.toFixed(1)} s · 영상 ${srcs.length}개`;
   let r;
   if (state.mode === "vlog") {
-    if (!state.vis) { drawVlog(state.env, [], null); return; }
-    r = selectShots(state.env, state.shots, vlogOpts(), state.overrides);
-    state.segments = r.segments;
-    drawVlog(state.env, state.shots, { times: state.vis.times, score: fsCache.score });
-    const used = state.shots.filter((s) => s.used).length;
-    const hand = state.overrides.size;
-    showStats(state.env.duration, r.outDuration, "사용한 장면", `${used}/${state.shots.length}`, hand ? `직접 고른 장면 ${hand}개` : "모두 자동 선택");
+    const withVis = srcs.filter((s) => s.vis);
+    if (!withVis.length) { drawVlog(srcs, []); showStats(D, 0, "사용한 장면", "-", "장면 분석 전", srcLine); return; }
+    r = selectShots(state.shots, withVis.reduce((t, s) => t + s.env.duration, 0), vlogOpts(), state.overrides);
+    drawVlog(withVis, state.shots);
+    const used = state.shots.filter((s) => s.used).length, hand = state.overrides.size;
+    showStats(D, r.outDuration, "사용한 장면", `${used}/${state.shots.length}`, hand ? `직접 고른 장면 ${hand}개` : "모두 자동 선택", srcLine);
     updateShotGrid();
   } else {
-    r = detectSilence(state.env, +$("thr").value, +$("minSil").value, +$("pad").value);
-    state.segments = r.segments;
-    drawTalk(state.env);
-    const removed = state.env.duration - r.outDuration;
-    showStats(state.env.duration, r.outDuration, "잘린 무음", `${Math.max(0, r.segments.length - 1)}곳`, `${removed.toFixed(1)} s 제거`);
+    let o = 0; const segs = [];
+    for (const s of srcs) { const q = detectSilence(s, +$("thr").value, +$("minSil").value, +$("pad").value, o); segs.push(...q.segments); o = q.out; }
+    r = { segments: segs, outDuration: o };
+    drawTalk(srcs, segs, +$("thr").value);
+    showStats(D, o, "잘린 무음", `${(D - o).toFixed(1)} s`, `${segs.length}조각 남김`, srcLine);
   }
+  state.segments = r.segments;
   if (state.blob) { state.blob = null; $("saveBtn").hidden = true; step("render", ""); step("save", ""); }
-  step("plan", "done", `${r.segments.length}조각`);
+  step("plan", r.segments.length ? "done" : "", `${r.segments.length}조각`);
   $("renderBtn").disabled = state.busy || !r.segments.length;
+  pvReset();
+}
+
+// ---------- 영상 목록 ----------
+function renderSources() {
+  const box = $("srcs");
+  box.textContent = "";
+  $("srcCard").hidden = !state.sources.length;
+  const n = state.sources.length;
+  state.sources.forEach((s, k) => {
+    const li = document.createElement("li");
+    li.className = "src";
+    const e = s.env;
+    const meta = e ? [e.width && `${e.width}×${e.height}`, fmt(e.duration), s.date ? s.date.toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : null].filter(Boolean).join(" · ")
+      : s.error ? s.error : "분석 대기";
+    const status = s.error ? "err" : state.mode === "vlog" ? (s.vis ? "done" : s.live ? "live" : "") : (e ? "done" : s.live ? "live" : "");
+    li.innerHTML = `<span class="no">${k + 1}</span><span class="dot ${status}"></span><span class="body"><span class="nm">${esc(s.file.name)}</span><span class="mt">${esc(meta)}</span></span>
+      <span class="acts"><button type="button" class="icon" data-act="up" aria-label="앞으로" data-off="${k === 0 ? 1 : 0}">↑</button><button type="button" class="icon" data-act="down" aria-label="뒤로" data-off="${k === n - 1 ? 1 : 0}">↓</button><button type="button" class="icon" data-act="del" aria-label="빼기" data-off="0">✕</button></span>`;
+    li.querySelectorAll(".icon").forEach((b) => {
+      b.disabled = state.busy || b.dataset.off === "1";
+      b.addEventListener("click", () => srcAction(s.id, b.dataset.act));
+    });
+    box.append(li);
+  });
+  $("fileName").textContent = n ? "영상 추가" : "영상 선택 또는 끌어다 놓기";
+  $("fileMeta").textContent = n ? `${n}개 선택됨 · 더 고르면 뒤에 추가됩니다` : "여러 개 선택 가능 · mp4 · mov · 합쳐서 10분 이하 권장";
+}
+function srcAction(id, act) {
+  if (state.busy) return;
+  const k = state.sources.findIndex((s) => s.id === id);
+  if (act === "up" && k > 0) [state.sources[k - 1], state.sources[k]] = [state.sources[k], state.sources[k - 1]];
+  if (act === "down" && k < state.sources.length - 1) [state.sources[k + 1], state.sources[k]] = [state.sources[k], state.sources[k + 1]];
+  if (act === "del") { const [s] = state.sources.splice(k, 1); URL.revokeObjectURL(s.url); for (const key of [...thumbs.keys()]) if (key.startsWith(`${s.id}:`)) thumbs.delete(key); }
+  renderSources(); rebuildShots(); recompute();
+  if (!state.sources.length) { $("previewCard").hidden = true; for (const k2 of ["audio", "scene", "plan", "render", "save"]) step(k2, ""); $("exampleTag").hidden = false; }
 }
 
 // ---------- 장면 그리드 ----------
-const thumbs = new Map();  // 샷 번호 -> canvas
+const thumbs = new Map();  // 샷 id -> canvas
 function renderShotGrid() {
   const box = $("shots");
   box.textContent = "";
   $("shotEmpty").hidden = state.shots.length > 0;
+  const order = new Map(state.sources.map((s, k) => [s.id, k + 1]));
+  const multi = state.sources.length > 1;
   for (const s of state.shots) {
     const b = document.createElement("button");
-    b.type = "button"; b.className = "shot"; b.dataset.i = s.i;
-    b.innerHTML = `<span class="thumb"></span><span class="meta"><span class="top"><span class="dot"></span><span>${fmt(s.a)}</span><span>${(s.b - s.a).toFixed(1)}s</span><span class="sc">${Math.round(s.score * 100)}</span></span><span class="tags"></span></span>`;
-    const th = thumbs.get(s.i); if (th) b.querySelector(".thumb").append(th);
-    b.addEventListener("click", () => cycleOverride(s.i));
+    b.type = "button"; b.className = "shot"; b.dataset.id = s.id;
+    b.innerHTML = `<span class="thumb"></span><span class="meta"><span class="top"><span class="dot"></span><span>${multi ? `${order.get(s.src)}·` : ""}${fmt(s.a)}</span><span>${(s.b - s.a).toFixed(1)}s</span><span class="sc">${Math.round(s.score * 100)}</span></span><span class="tags"></span></span>`;
+    const th = thumbs.get(s.id); if (th) b.querySelector(".thumb").append(th);
+    b.addEventListener("click", () => cycleOverride(s.id));
     box.append(b);
   }
 }
 function updateShotGrid() {
   for (const s of state.shots) {
-    const b = $("shots").querySelector(`.shot[data-i="${s.i}"]`); if (!b) continue;
-    const o = state.overrides.get(s.i);
+    const b = $("shots").querySelector(`.shot[data-id="${s.id}"]`); if (!b) continue;
+    const o = state.overrides.get(s.id);
     b.className = "shot " + (s.used ? "on" : "off");
     b.querySelector(".dot").className = "dot" + (s.used ? " done" : "");
     const tags = [];
@@ -800,18 +954,17 @@ function updateShotGrid() {
     b.setAttribute("aria-label", `${fmt(s.a)} 장면, ${s.used ? "사용" : "제외"}${o ? ", 직접 선택" : ""}`);
   }
 }
-function cycleOverride(i) {
+function cycleOverride(id) {
   if (state.busy) return;
-  const o = state.overrides.get(i);
-  if (!o) state.overrides.set(i, "in"); else if (o === "in") state.overrides.set(i, "out"); else state.overrides.delete(i);
+  const o = state.overrides.get(id);
+  if (!o) state.overrides.set(id, "in"); else if (o === "in") state.overrides.set(id, "out"); else state.overrides.delete(id);
   recompute();
 }
-async function makeThumbs(file) {
-  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+async function makeThumbs(src) {
+  const input = new Input({ source: new BlobSource(src.file), formats: ALL_FORMATS });
   const vt = await input.getPrimaryVideoTrack();
-  const landscape = state.env.width >= state.env.height;
-  const sink = new CanvasSink(vt, landscape ? { width: 240 } : { height: 240 });
-  const order = [...state.shots].sort((a, b) => a.thumbT - b.thumbT);
+  const sink = new CanvasSink(vt, src.env.width >= src.env.height ? { width: 240 } : { height: 240 });
+  const order = [...src.shots].sort((a, b) => a.thumbT - b.thumbT);
   let k = 0;
   for await (const wc of sink.canvasesAtTimestamps(order.map((s) => s.thumbT))) {
     const s = order[k++];
@@ -819,85 +972,129 @@ async function makeThumbs(file) {
     const c = document.createElement("canvas");
     c.width = wc.canvas.width; c.height = wc.canvas.height;
     c.getContext("2d").drawImage(wc.canvas, 0, 0);
-    thumbs.set(s.i, c);
-    const cell = $("shots").querySelector(`.shot[data-i="${s.i}"] .thumb`);
+    thumbs.set(s.id, c);
+    const cell = $("shots").querySelector(`.shot[data-id="${s.id}"] .thumb`);
     if (cell) { cell.textContent = ""; cell.append(c); }
   }
 }
 
-// ---------- 미리보기: 편집본처럼 재생 ----------
+// ---------- 미리보기: 편집본 순서대로 영상을 바꿔 가며 재생 ----------
 const video = $("video");
-function skipCuts() {
-  if (!$("skip").checked || !state.env || video.paused || !state.segments.length) return;
-  const t = video.currentTime;
-  const seg = state.segments.find((s) => t < s.b - 0.03);
-  if (!seg) { video.pause(); return; }
-  if (t < seg.a - 0.02) video.currentTime = seg.a;
+const pv = { k: 0, src: null, switching: false };
+function pvShow(srcId) {
+  const s = srcById(srcId); if (!s) return;
+  if (pv.src !== srcId) { pv.src = srcId; video.src = s.url; }
+  $("pvInfo").textContent = state.sources.length > 1 ? `영상 ${state.sources.indexOf(s) + 1}` : "";
 }
-video.addEventListener("timeupdate", skipCuts);
-video.addEventListener("play", skipCuts);
+function pvReset() {
+  pv.k = 0;
+  if (!state.sources.length) return;
+  const first = state.segments[0]?.src ?? state.sources[0].id;
+  if (pv.src !== first) pvShow(first);
+}
+async function pvJump(k) {
+  const seg = state.segments[k];
+  if (!seg) { video.pause(); pv.k = 0; return; }
+  pv.k = k;
+  if (pv.src !== seg.src) {
+    pv.switching = true;
+    pvShow(seg.src);
+    await new Promise((r) => video.addEventListener("loadedmetadata", r, { once: true }));
+    video.currentTime = seg.a;
+    try { await video.play(); } catch {}
+    pv.switching = false;
+  } else video.currentTime = seg.a;
+}
+function pvTick() {
+  if (!$("skip").checked || video.paused || pv.switching || !state.segments.length) return;
+  const t = video.currentTime;
+  let seg = state.segments[pv.k];
+  if (!seg || seg.src !== pv.src || t < seg.a - 0.3 || t > seg.b + 0.3) {
+    // 사용자가 직접 위치를 옮긴 경우: 현재 영상에서 그 뒤의 첫 구간을 찾는다
+    const k = state.segments.findIndex((s) => s.src === pv.src && t < s.b - 0.03);
+    if (k < 0) { pvJump(state.segments.findIndex((s) => s.src !== pv.src && state.segments.indexOf(s) > pv.k)); return; }
+    pv.k = k; seg = state.segments[k];
+  }
+  if (t < seg.a - 0.02) video.currentTime = seg.a;
+  else if (t >= seg.b - 0.03) pvJump(pv.k + 1);
+}
+video.addEventListener("timeupdate", pvTick);
+video.addEventListener("play", pvTick);
 if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
-  const loop = () => { skipCuts(); video.requestVideoFrameCallback(loop); };
+  const loop = () => { pvTick(); video.requestVideoFrameCallback(loop); };
   video.requestVideoFrameCallback(loop);
 }
 
 // ---------- 흐름 ----------
-async function ensureVisual() {
-  if (state.vis || !state.env?.hasVideo) return;
+async function analyzeAll() {
+  if (state.busy) return;
   setBusy(true); keepAwake(true);
-  setMsg("장면을 분석하는 중입니다. 화면을 켜 두세요.");
   try {
-    const [vis, ms] = await timed("scene", (rep) => analyzeVisual(state.file, state.env, rep));
-    state.vis = vis; fsCache = null;
-    rebuildShots();
-    step("scene", "done", `${state.shots.length}장면 · ${(ms / 1000).toFixed(1)} s`);
-    recompute();
-    setMsg("장면을 확인하고, 마음에 안 드는 장면은 탭해서 바꾸세요.");
-    makeThumbs(state.file).catch((e) => console.warn("썸네일 실패", e));
-  } catch (e) {
-    console.error(e); step("scene", "err", "실패"); setMsg(e.message || String(e), true);
-  } finally { keepAwake(false); setBusy(false); }
+    // 1) 오디오 + 기본 정보
+    const needA = state.sources.filter((s) => !s.env && !s.error);
+    if (needA.length) {
+      setMsg("오디오를 분석하는 중입니다.");
+      await timed("audio", async (rep) => {
+        for (const [k, s] of needA.entries()) {
+          s.live = true; renderSources();
+          try { s.env = await analyzeAudio(s.file, (p) => rep(`${k + 1}/${needA.length} · ${p}%`)); s.date = s.env.date; }
+          catch (e) { console.error(e); const m = e.message || String(e); s.error = m.includes(s.file.name) ? m : `${s.file.name}: ${m}`; }
+          s.live = false;
+        }
+      });
+      // 새로 들어온 영상은 촬영 시각(없으면 파일 시각) 순으로 정렬
+      if (needA.length === state.sources.length) {
+        state.sources.sort((x, y) => (x.date ?? new Date(x.file.lastModified)) - (y.date ?? new Date(y.file.lastModified)));
+      }
+      const bad = state.sources.filter((s) => s.error);
+      step("audio", bad.length ? "err" : "done", bad.length ? `${bad.length}개 실패` : `영상 ${ready().length}개`);
+      renderSources(); recompute();
+    }
+    // 2) 장면 (브이로그 모드일 때만)
+    if (state.mode === "vlog") {
+      const needV = ready().filter((s) => !s.vis);
+      if (needV.length) {
+        setMsg("장면을 분석하는 중입니다. 화면을 켜 두세요.");
+        const [, ms] = await timed("scene", async (rep) => {
+          for (const [k, s] of needV.entries()) {
+            s.live = true; renderSources();
+            try { s.vis = await analyzeVisual(s.file, s.env, (p) => rep(`${k + 1}/${needV.length} · ${p}%`)); s.fs = null; }
+            catch (e) { console.error(e); const m = e.message || String(e); s.error = m.includes(s.file.name) ? m : `${s.file.name}: ${m}`; }
+            s.live = false;
+          }
+        });
+        rebuildShots();
+        step("scene", "done", `${state.shots.length}장면 · ${(ms / 1000).toFixed(1)} s`);
+        renderSources(); recompute();
+        for (const s of needV) if (s.vis) makeThumbs(s).catch((e) => console.warn("썸네일 실패", e));
+      }
+      setMsg(state.shots.length ? "장면을 확인하고, 마음에 안 드는 장면은 탭해서 바꾸세요." : "쓸 수 있는 장면이 없습니다.", !state.shots.length);
+    } else setMsg("미리보기로 컷을 확인하고, 기준을 조절한 뒤 MP4를 만드세요.");
+    const failed = state.sources.filter((s) => s.error);
+    if (failed.length) setMsg(`${failed.map((s) => s.error).join(" / ")} → 목록에서 빼고 계속하세요.`, true);
+  } finally { keepAwake(false); setBusy(false); renderSources(); }
 }
 
-async function load(file) {
-  if (state.busy || !file) return;
-  Object.assign(state, { file, env: null, vis: null, shots: [], segments: [], blob: null });
-  state.overrides.clear(); thumbs.clear(); fsCache = null;
-  $("saveBtn").hidden = true;
-  for (const k of ["audio", "scene", "plan", "render", "save"]) step(k, "");
-  $("fileName").textContent = file.name;
-  $("fileMeta").textContent = `${(file.size / 1024 / 1024).toFixed(1)} MB`;
+function addFiles(files) {
+  if (state.busy) return;
+  const vids = [...files].filter((f) => f.type.startsWith("video/") || /\.(mp4|mov|m4v)$/i.test(f.name));
+  if (!vids.length) return;
+  for (const f of vids) state.sources.push({ id: nextId++, file: f, url: URL.createObjectURL(f), env: null, vis: null, fs: null, shots: [], date: null });
+  state.blob = null; $("saveBtn").hidden = true; step("render", ""); step("save", "");
   $("exampleTag").hidden = true;
-  $("shots").textContent = ""; $("shotEmpty").hidden = false;
-  if (state.url) URL.revokeObjectURL(state.url);
-  state.url = URL.createObjectURL(file);
-  video.src = state.url;
   $("previewCard").hidden = false;
-  setBusy(true); setMsg("오디오를 분석하는 중입니다.");
-  try {
-    const [env, ms] = await timed("audio", (rep) => analyzeAudio(file, rep));
-    state.env = env;
-    step("audio", "done", env.hasAudio ? `${(ms / 1000).toFixed(1)} s` : "오디오 없음");
-    const meta = [env.width && `${env.width}×${env.height}`, `${env.fps.toFixed(2)} fps`, fmt(env.duration), `${(file.size / 1024 / 1024).toFixed(1)} MB`].filter(Boolean);
-    $("fileMeta").textContent = meta.join(" · ");
-  } catch (e) {
-    console.error(e); step("audio", "err", "실패"); setMsg(e.message || String(e), true);
-    setBusy(false); return;
-  }
-  setBusy(false);
-  recompute();
-  if (state.mode === "vlog") await ensureVisual();
-  else setMsg("미리보기로 컷을 확인하고, 기준을 조절한 뒤 MP4를 만드세요.");
+  renderSources();
+  analyzeAll();
 }
 
 async function doRender() {
-  if (!state.env || state.busy || !state.segments.length) return;
+  if (state.busy || !state.segments.length) return;
   setBusy(true); keepAwake(true);
   setMsg("렌더링 중입니다. 화면을 켜 두세요.");
   try {
-    const [blob, ms] = await timed("render", (rep) => render(state.file, state.segments, state.env, rep));
+    const [{ blob, spec }, ms] = await timed("render", (rep) => render(state.segments, rep));
     state.blob = blob;
-    step("render", "done", `${(ms / 1000).toFixed(1)} s`);
+    step("render", "done", `${spec ? `${spec.width}×${spec.height} · ` : ""}${(ms / 1000).toFixed(1)} s`);
     step("save", "done", `${(blob.size / 1024 / 1024).toFixed(1)} MB`);
     $("saveBtn").hidden = false;
     setMsg("완료. 저장한 뒤 CapCut에서 재생해 확인하세요.");
@@ -906,7 +1103,10 @@ async function doRender() {
   } finally { keepAwake(false); setBusy(false); }
 }
 
-function outName() { return (state.file?.name.replace(/\.[^.]+$/, "") || "video") + (state.mode === "vlog" ? "_vlogcut.mp4" : "_jumpcut.mp4"); }
+function outName() {
+  const base = state.sources[0]?.file.name.replace(/\.[^.]+$/, "") || "video";
+  return `${base}${state.sources.length > 1 ? `_외${state.sources.length - 1}개` : ""}${state.mode === "vlog" ? "_vlogcut" : "_jumpcut"}.mp4`;
+}
 
 async function save() {
   if (!state.blob) return;
@@ -936,22 +1136,23 @@ function setMode(mode) {
   $("shotCard").hidden = mode !== "vlog";
   $("modeChip").textContent = mode === "vlog" ? "브이로그 · 장면 컷" : "토킹 · 무음 컷";
   document.querySelector('.step[data-k="scene"]').hidden = mode !== "vlog";
-  recompute();
-  if (mode === "vlog" && state.env) ensureVisual();
+  renderSources(); recompute();
+  if (mode === "vlog" && ready().some((s) => !s.vis)) analyzeAll();
 }
 
 // ---------- 이벤트 ----------
-$("file").addEventListener("change", (e) => load(e.target.files[0]));
+$("file").addEventListener("change", (e) => { addFiles(e.target.files); e.target.value = ""; });
 const drop = $("drop");
 ["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
 ["dragleave", "drop"].forEach((t) => drop.addEventListener(t, () => drop.classList.remove("over")));
-drop.addEventListener("drop", (e) => { e.preventDefault(); load(e.dataTransfer.files[0]); });
-["thr", "minSil", "pad", "target", "maxClip"].forEach((id) => $(id).addEventListener("input", () => {
-  if (id === "maxClip" && state.vis) { const keep = new Map(state.overrides); rebuildShots(); keep.forEach((v, k) => state.overrides.set(k, v)); }
-  recompute();
-}));
-$("sens").addEventListener("input", () => { thumbs.clear(); rebuildShots(); recompute(); if (state.vis) makeThumbs(state.file).catch(() => {}); });
-$("speech").addEventListener("change", () => { const keep = new Map(state.overrides); rebuildShots(); keep.forEach((v, k) => state.overrides.set(k, v)); recompute(); });
+drop.addEventListener("drop", (e) => { e.preventDefault(); addFiles(e.dataTransfer.files); });
+["thr", "minSil", "pad", "target"].forEach((id) => $(id).addEventListener("input", recompute));
+$("maxClip").addEventListener("input", () => { rebuildShots(); recompute(); });
+$("speech").addEventListener("change", () => { rebuildShots(); recompute(); });
+$("sens").addEventListener("input", () => {
+  thumbs.clear(); rebuildShots({ keepOverrides: false }); recompute();
+  for (const s of ready()) if (s.vis) makeThumbs(s).catch(() => {});
+});
 $("modeVlog").addEventListener("click", () => setMode("vlog"));
 $("modeTalk").addEventListener("click", () => setMode("talk"));
 $("renderBtn").addEventListener("click", doRender);
@@ -965,5 +1166,5 @@ window.addEventListener("resize", recompute);
   if (!ok) setMsg("이 브라우저는 영상 인코딩(WebCodecs)을 지원하지 않습니다. iPadOS 17 이상의 Safari를 사용하세요.", true);
 })();
 recompute();
-window.__capcutAgent = { state, load, doRender, setMode, cycleOverride };  // 테스트용
+window.__capcutAgent = { state, addFiles, doRender, setMode, cycleOverride, srcAction };  // 테스트용
 </script>
