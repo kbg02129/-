@@ -1,9 +1,9 @@
 """capcut-agent 명령줄 도구.
 
-    capcut-agent input.mp4                # 컷 편집 영상 + SRT 자막 생성
+    capcut-agent input.mp4                # CapCut 초안(컷 편집 + 자막 트랙) 생성
     capcut-agent input.mp4 --llm          # Claude 로 NG/버벅임 추가 검토
-    capcut-agent input.mp4 --burn         # 자막을 영상에 입혀서 출력 (CapCut 모바일용)
-    capcut-agent input.mp4 --dry-run      # 렌더링 없이 분석 결과만 확인
+    capcut-agent input.mp4 --render       # 초안과 함께 컷 편집된 MP4 도 렌더링
+    capcut-agent input.mp4 --dry-run      # 초안/영상 없이 분석 결과와 SRT 만 확인
 """
 from __future__ import annotations
 
@@ -42,11 +42,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     g.add_argument("--fillers", help="추임새 목록 직접 지정 (쉼표 구분, 예: 음,어,그니까)")
     g.add_argument("--llm", action="store_true", help="Claude 로 NG·버벅임·오타 추가 검토 (ANTHROPIC_API_KEY 필요)")
 
-    g = p.add_argument_group("자막 / 출력")
+    g = p.add_argument_group("CapCut 초안 (pycapcut)")
+    g.add_argument("--draft-dir", help="CapCut 초안 폴더 (기본: CapCut 기본 위치, 없으면 결과 폴더)")
+    g.add_argument("--draft-name", help="초안 이름 (기본: <파일이름>_자동편집)")
+    g.add_argument("--replace", action="store_true", help="같은 이름의 초안이 있으면 덮어쓰기")
+    g.add_argument("--no-draft", action="store_true", help="CapCut 초안을 만들지 않음")
     g.add_argument("--max-chars", type=int, default=18, help="자막 한 줄 최대 글자 수 (기본 18)")
-    g.add_argument("--burn", action="store_true", help="자막을 영상에 입혀서 렌더링")
+    g.add_argument("--font-size", type=float, default=7.0, help="자막 글자 크기 (CapCut 기준, 기본 7)")
+    g.add_argument("--subtitle-y", type=float, default=-0.8,
+                   help="자막 세로 위치 (-1 맨 아래 ~ 1 맨 위, 기본 -0.8)")
+
+    g = p.add_argument_group("영상 렌더링 (선택)")
+    g.add_argument("--render", action="store_true", help="컷 편집된 MP4 도 ffmpeg 로 렌더링")
+    g.add_argument("--burn", action="store_true", help="자막을 입힌 MP4 렌더링 (--render 포함)")
     g.add_argument("--crf", type=int, default=18, help="화질 (낮을수록 고화질, 기본 18)")
-    g.add_argument("--dry-run", action="store_true", help="렌더링하지 않고 분석/자막만 생성")
+    g.add_argument("--dry-run", action="store_true", help="초안/영상 없이 분석 결과와 SRT 만 생성")
     return p.parse_args(argv)
 
 
@@ -108,20 +118,37 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(plan.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
     print(summarize(plan))
 
+    draft_path = None
     video = out_dir / f"{src.stem}_edited.mp4"
     if args.dry_run:
-        print("5/5 --dry-run: 렌더링 건너뜀")
+        print("5/5 --dry-run: 초안/렌더링 건너뜀")
     else:
-        print("5/5 렌더링")
-        from .render import render
-        render(info, plan.segments, str(video), burn_subtitles=str(srt) if args.burn else None,
-               crf=args.crf)
+        if not args.no_draft:
+            print("5/5 CapCut 초안 생성 (pycapcut)")
+            from .draft import build_draft, default_draft_dir
+            draft_dir = Path(args.draft_dir).expanduser() if args.draft_dir else default_draft_dir()
+            if draft_dir is None:
+                draft_dir = out_dir
+                print("    CapCut 초안 폴더를 찾지 못해 결과 폴더에 저장합니다 (--draft-dir 로 지정 가능)")
+            draft_path = build_draft(
+                info, plan.segments, plan.captions, draft_dir,
+                args.draft_name or f"{src.stem}_자동편집",
+                font_size=args.font_size, subtitle_y=args.subtitle_y, replace=args.replace)
+        if args.render or args.burn:
+            print("    MP4 렌더링 (ffmpeg)")
+            from .render import render
+            render(info, plan.segments, str(video),
+                   burn_subtitles=str(srt) if args.burn else None, crf=args.crf)
 
     print(f"\n완료! 결과 폴더: {out_dir}")
-    if not args.dry_run:
-        print(f"  영상: {video.name}")
     print(f"  자막: {srt.name}")
-    print("CapCut: 영상 가져오기 -> 텍스트 > 자막 > 자막 가져오기(Import captions) 에서 SRT 선택")
+    if (args.render or args.burn) and not args.dry_run:
+        print(f"  영상: {video.name}")
+    if draft_path:
+        print(f"  CapCut 초안: {draft_path}")
+        print("CapCut 을 열면 초안 목록에 나타납니다. 안 보이면 CapCut 을 다시 시작하세요.")
+        if draft_path.parent == out_dir:
+            print("(이 초안 폴더를 CapCut 설정 > 초안 위치 폴더로 옮겨야 CapCut 에서 보입니다)")
     return 0
 
 

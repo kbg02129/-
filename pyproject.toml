@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "capcut-agent"
 version = "0.1.0"
-description = "무음·버벅임 자동 컷 편집과 자막 생성을 해주는 CapCut 편집 도우미"
+description = "무음·버벅임 자동 컷 편집과 자막을 CapCut 초안으로 만들어 주는 편집 도우미 (pycapcut 기반)"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["pycapcut>=0.0.3"]
 
 [project.optional-dependencies]
 whisper = ["faster-whisper>=1.0"]
