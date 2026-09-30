@@ -1,0 +1,569 @@
+<title>캡컷 에이전트</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<script type="importmap">
+{ "imports": {
+  "mediabunny": "https://cdn.jsdelivr.net/npm/mediabunny@1.61.0/dist/bundles/mediabunny.min.mjs",
+  "@mediabunny/aac-encoder": "https://cdn.jsdelivr.net/npm/@mediabunny/aac-encoder@1.61.0/dist/bundles/mediabunny-aac-encoder.min.mjs"
+} }
+</script>
+<style>
+/* 레이아웃: 한 열 작업대. 위에서 아래로 입력 → 파형 → 통계 → 단계 → 결과. 카드 한 겹, 구분은 1px 선. */
+:root {
+  color-scheme: dark;
+  --bg: #0a0a0a;
+  --card: #161616;
+  --line: #262626;
+  --fg: #ededed;
+  --muted: #8a8a8a;
+  --faint: #4a4a4a;
+  --accent: #22c55e;
+  --accent-soft: rgba(34, 197, 94, 0.14);
+  --danger: #f87171;
+  --sans: "Geist", "Apple SD Gothic Neo", "Pretendard", system-ui, sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --r: 10px;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--sans);
+  font-size: 15px; line-height: 1.55; -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 880px; margin: 0 auto; padding-inline: 20px; padding-block: 28px 64px; display: flex; flex-direction: column; gap: 20px; }
+.num, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
+h2 { font-size: 12px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 0; width: 100%; }
+.chip { font-family: var(--mono); font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; white-space: nowrap; }
+.chip.on { color: var(--accent); border-color: rgba(34,197,94,.35); }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); flex: none; }
+.dot.live { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), 0 0 10px rgba(34,197,94,.7); animation: pulse 1.2s ease-in-out infinite; }
+.dot.done { background: var(--accent); box-shadow: 0 0 8px rgba(34,197,94,.45); }
+.dot.err { background: var(--danger); box-shadow: 0 0 8px rgba(248,113,113,.5); }
+@keyframes pulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .dot.live { animation: none; } }
+
+header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+header .sub { color: var(--muted); font-size: 13px; flex-basis: 100%; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: var(--r); }
+.section { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
+.row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.spacer { flex: 1; }
+
+/* 입력 */
+.drop { position: relative; display: flex; align-items: center; gap: 14px; padding: 18px 20px; cursor: pointer; transition: border-color .15s; }
+.drop:hover, .drop.over { border-color: rgba(34,197,94,.5); }
+.drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.drop .t { font-weight: 500; }
+.drop .m { color: var(--muted); font-size: 13px; }
+.drop .info { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.drop .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plus { width: 36px; height: 36px; border-radius: 8px; border: 1px dashed var(--faint); display: grid; place-items: center; color: var(--muted); font-family: var(--mono); flex: none; }
+
+/* 설정 */
+.controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px 24px; }
+.ctl { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ctl label { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--muted); }
+.ctl label b { font-weight: 500; color: var(--fg); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 28px; background: transparent; }
+input[type=range]::-webkit-slider-runnable-track { height: 2px; background: var(--line); }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: var(--fg); margin-top: -7px; border: 3px solid var(--bg); }
+input[type=range]::-moz-range-track { height: 2px; background: var(--line); }
+input[type=range]::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: var(--fg); border: 3px solid var(--bg); }
+input[type=range]:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+
+/* 파형 */
+.wave { position: relative; width: 100%; height: 120px; }
+.wave canvas { width: 100%; height: 100%; display: block; }
+.legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 2px; vertical-align: middle; margin-right: 6px; }
+
+/* 통계 */
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.stat { padding: 16px 20px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.stat + .stat { border-left: 1px solid var(--line); }
+.stat .k { font-size: 12px; color: var(--muted); }
+.stat .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 500; letter-spacing: -0.02em; }
+.stat .d { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.stat .v.acc { color: var(--accent); }
+
+/* 단계 */
+.steps { list-style: none; margin: 0; padding: 0; }
+.step { display: flex; align-items: center; gap: 12px; padding: 11px 20px; font-size: 14px; }
+.step + .step { border-top: 1px solid var(--line); }
+.step .l { flex: 1; color: var(--muted); }
+.step.live .l, .step.done .l { color: var(--fg); }
+.step .r { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); }
+
+/* 미리보기 */
+video { width: 100%; max-height: 52vh; background: #000; border-radius: 8px; display: block; }
+
+/* 버튼 */
+.btn { font: inherit; font-weight: 500; font-size: 14px; padding: 10px 16px; border-radius: 8px; border: 1px solid var(--line); background: transparent; color: var(--fg); cursor: pointer; }
+.btn:hover:not(:disabled) { border-color: var(--faint); }
+.btn.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.btn.primary:hover:not(:disabled) { background: #fff; }
+.btn.go { background: var(--accent); color: #04130a; border-color: var(--accent); }
+.btn:disabled { opacity: .4; cursor: default; }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); cursor: pointer; }
+.toggle input { accent-color: var(--accent); width: 16px; height: 16px; }
+
+.msg { font-size: 13px; color: var(--muted); }
+.msg.err { color: var(--danger); }
+.how { font-size: 13px; color: var(--muted); display: flex; flex-direction: column; gap: 6px; }
+.how code { font-family: var(--mono); font-size: 12px; color: var(--fg); background: #1f1f1f; border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; }
+.example { font-family: var(--mono); font-size: 11px; color: var(--muted); letter-spacing: .06em; }
+
+@media (max-width: 640px) {
+  .controls { grid-template-columns: 1fr; }
+  .stat { padding: 14px 12px; }
+  .stat .v { font-size: 18px; }
+}
+</style>
+
+<div class="wrap">
+  <header>
+    <span class="dot" id="hdrDot"></span>
+    <h1>캡컷 에이전트</h1>
+    <span class="chip on">1단 · 무음 점프컷</span>
+    <span class="chip" id="engineChip">엔진 확인 중</span>
+    <p class="sub">iPad 브라우저 안에서 무음 구간을 찾아 잘라낸 MP4를 만듭니다. 영상은 기기 밖으로 나가지 않습니다.</p>
+  </header>
+
+  <label class="card drop" id="drop" for="file">
+    <span class="plus">+</span>
+    <span class="info">
+      <span class="t name" id="fileName">영상 선택 또는 끌어다 놓기</span>
+      <span class="m num" id="fileMeta">mp4 · mov · 짧은 토킹 영상 권장 (10분 이하)</span>
+    </span>
+    <input type="file" id="file" accept="video/mp4,video/quicktime,video/*">
+  </label>
+
+  <div class="card">
+    <div class="section">
+      <div class="row"><h2>무음 기준</h2><span class="spacer"></span><span class="example" id="exampleTag">예시 파형</span></div>
+      <div class="controls">
+        <div class="ctl">
+          <label for="thr">이 소리 이하는 무음 <b id="thrV">-35 dB</b></label>
+          <input type="range" id="thr" min="-60" max="-15" step="1" value="-35">
+        </div>
+        <div class="ctl">
+          <label for="minSil">최소 무음 길이 <b id="minSilV">0.60 s</b></label>
+          <input type="range" id="minSil" min="0.2" max="2" step="0.05" value="0.6">
+        </div>
+        <div class="ctl">
+          <label for="pad">앞뒤 여유 <b id="padV">0.15 s</b></label>
+          <input type="range" id="pad" min="0" max="0.5" step="0.01" value="0.15">
+        </div>
+      </div>
+      <div class="wave"><canvas id="wave"></canvas></div>
+      <div class="legend">
+        <span><i style="background:var(--fg)"></i>음량</span>
+        <span><i style="background:var(--accent)"></i>무음 기준선</span>
+        <span><i style="background:var(--faint);height:8px"></i>잘릴 구간</span>
+      </div>
+    </div>
+    <hr>
+    <div class="stats">
+      <div class="stat"><span class="k">원본</span><span class="v" id="sSrc">1:24</span><span class="d" id="sSrcD">84.0 s</span></div>
+      <div class="stat"><span class="k">편집본</span><span class="v acc" id="sOut">1:02</span><span class="d" id="sOutD">62.3 s</span></div>
+      <div class="stat"><span class="k">잘린 무음</span><span class="v" id="sCut">14곳</span><span class="d" id="sCutD">21.7 s · 26%</span></div>
+    </div>
+  </div>
+
+  <div class="card" id="previewCard" hidden>
+    <div class="section">
+      <div class="row">
+        <h2>미리보기</h2><span class="spacer"></span>
+        <label class="toggle" for="skip"><input type="checkbox" id="skip" checked>잘린 구간 건너뛰기</label>
+      </div>
+      <video id="video" playsinline controls preload="metadata"></video>
+    </div>
+  </div>
+
+  <div class="card">
+    <ol class="steps" id="steps">
+      <li class="step" data-k="decode"><span class="dot"></span><span class="l">오디오 분석</span><span class="r"></span></li>
+      <li class="step" data-k="silence"><span class="dot"></span><span class="l">무음 감지</span><span class="r"></span></li>
+      <li class="step" data-k="render"><span class="dot"></span><span class="l">점프컷 렌더링</span><span class="r"></span></li>
+      <li class="step" data-k="save"><span class="dot"></span><span class="l">CapCut으로 보낼 파일</span><span class="r"></span></li>
+    </ol>
+    <hr>
+    <div class="section">
+      <div class="row">
+        <button class="btn primary" id="renderBtn" disabled>점프컷 MP4 만들기</button>
+        <button class="btn go" id="saveBtn" hidden>MP4 저장</button>
+        <span class="msg" id="msg">영상을 고르면 바로 분석합니다.</span>
+      </div>
+      <div class="how">
+        <span>CapCut iPad: <code>새 프로젝트</code> → 저장한 영상 선택 → 재생해서 컷 확인. 자막은 3단에서 추가됩니다.</span>
+        <span>렌더링 중에는 화면을 켜 두세요. iPad가 잠기면 브라우저가 작업을 멈춥니다.</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import {
+  Input, Output, BlobSource, BufferTarget, ALL_FORMATS, Mp4OutputFormat,
+  AudioSampleSink, VideoSampleSink, VideoSampleSource, AudioSampleSource,
+  QUALITY_HIGH, canEncodeAudio, getFirstEncodableVideoCodec,
+} from "mediabunny";
+
+const $ = (id) => document.getElementById(id);
+const WIN = 0.01;          // 음량 분석 창 (초)
+const MIN_KEEP = 0.2;      // 이보다 짧게 남는 조각은 버림
+const MIN_STEP_MS = 500;   // 단계가 너무 빨리 지나가도 보이도록 최소 표시 시간
+const VIDEO_CODECS = window.__testVideoCodecs ?? ["avc", "hevc"];  // 테스트에서만 바꿈 (H.264 없는 Chromium)
+
+const state = { file: null, url: null, env: null, duration: 0, fps: 30, segments: [], cuts: [], blob: null, busy: false };
+
+// ---------- 표시 도우미 ----------
+const fmt = (s) => { s = Math.max(0, s); const m = Math.floor(s / 60); const r = Math.round(s - m * 60); return r === 60 ? `${m + 1}:00` : `${m}:${String(r).padStart(2, "0")}`; };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function step(k, status, right = "") {
+  const li = document.querySelector(`.step[data-k="${k}"]`);
+  li.className = "step" + (status ? " " + status : "");
+  li.querySelector(".dot").className = "dot" + (status === "live" ? " live" : status === "done" ? " done" : status === "err" ? " err" : "");
+  li.querySelector(".r").textContent = right;
+}
+async function timed(k, fn) {
+  const t0 = performance.now();
+  step(k, "live");
+  const out = await fn((txt) => step(k, "live", txt));
+  const dt = performance.now() - t0;
+  if (dt < MIN_STEP_MS) await sleep(MIN_STEP_MS - dt);
+  return [out, performance.now() - t0];
+}
+function setMsg(text, err = false) { $("msg").textContent = text; $("msg").className = "msg" + (err ? " err" : ""); }
+function setBusy(b) { state.busy = b; $("hdrDot").className = "dot" + (b ? " live" : state.blob ? " done" : ""); $("renderBtn").disabled = b || !state.env; }
+
+// ---------- 화면 켜두기 (렌더링 중 iPad 잠금 방지) ----------
+let wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on && "wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen");
+    else if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch { wakeLock = null; }
+}
+
+// ---------- 1. 오디오 분석: 10ms 창마다 음량(dB) ----------
+async function analyze(file, report) {
+  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+  const duration = await input.computeDuration();
+  const vt = await input.getPrimaryVideoTrack();
+  const at = await input.getPrimaryAudioTrack();
+  if (!at) throw new Error("오디오 트랙이 없는 영상입니다.");
+  if (!(await at.canDecode())) throw new Error("이 브라우저가 오디오를 해독하지 못합니다.");
+  let fps = 30, width = 0, height = 0;
+  if (vt) {
+    const stats = await vt.computePacketStats(120);
+    fps = stats.averagePacketRate || 30;
+    width = await vt.getDisplayWidth(); height = await vt.getDisplayHeight();
+  }
+  const n = Math.ceil(duration / WIN) + 1;
+  const sum = new Float64Array(n), cnt = new Uint32Array(n);
+  const sink = new AudioSampleSink(at);
+  let buf = new Float32Array(0), lastReport = 0;
+  for await (const s of sink.samples()) {
+    const frames = s.numberOfFrames, sr = s.sampleRate;
+    if (buf.length < frames) buf = new Float32Array(frames);
+    s.copyTo(buf, { planeIndex: 0, format: "f32-planar" });
+    const t0 = s.timestamp;
+    for (let i = 0; i < frames; i++) {
+      const w = Math.floor((t0 + i / sr) / WIN);
+      if (w >= 0 && w < n) { sum[w] += buf[i] * buf[i]; cnt[w]++; }
+    }
+    s.close();
+    if (t0 - lastReport > 1) { lastReport = t0; report(`${Math.min(99, Math.round(t0 / duration * 100))}%`); }
+  }
+  const db = new Float32Array(n);
+  for (let i = 0; i < n; i++) db[i] = cnt[i] ? 10 * Math.log10(sum[i] / cnt[i] + 1e-12) : -100;
+  return { db, duration, fps, width, height, hasVideo: !!vt };
+}
+
+// ---------- 2. 무음 감지 → 남길 구간 (ffmpeg silencedetect 와 같은 규칙) ----------
+function detect(env, thr, minSil, pad) {
+  const { db, duration, fps } = env;
+  const silences = [];
+  let start = -1;
+  for (let i = 0; i <= db.length; i++) {
+    const quiet = i < db.length && db[i] < thr;
+    if (quiet && start < 0) start = i;
+    if (!quiet && start >= 0) {
+      const a = start * WIN, b = Math.min(i * WIN, duration);
+      if (b - a >= minSil) silences.push([a, b]);
+      start = -1;
+    }
+  }
+  // 여유를 남기고 자름. 파일 맨 앞/뒤 무음은 여유 없이 끝까지 자른다.
+  const cuts = [];
+  for (const [a, b] of silences) {
+    const s = a <= 0 ? 0 : a + pad, e = b >= duration - WIN ? duration : b - pad;
+    if (e - s > 0.05) cuts.push([s, e]);
+  }
+  const snap = (t) => Math.round(t * fps) / fps;
+  const segments = [];
+  let cur = 0;
+  for (const [s, e] of cuts) { if (s - cur >= MIN_KEEP) segments.push([cur, s]); cur = Math.max(cur, e); }
+  if (duration - cur >= MIN_KEEP) segments.push([cur, duration]);
+  let out = 0;
+  const snapped = [];
+  for (const [a0, b0] of segments) {
+    const a = snap(a0), b = Math.min(snap(b0), duration);
+    if (b - a <= 0) continue;
+    snapped.push({ a, b, o: out });
+    out += b - a;
+  }
+  return { segments: snapped, cuts, outDuration: out };
+}
+
+// ---------- 3. 렌더링: 남길 구간만 이어 붙여 새 MP4 ----------
+async function render(file, segments, env, report) {
+  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+  const vt = await input.getPrimaryVideoTrack();
+  const at = await input.getPrimaryAudioTrack();
+  const output = new Output({ format: new Mp4OutputFormat({ fastStart: "in-memory" }), target: new BufferTarget() });
+  const total = segments.reduce((t, s) => t + (s.b - s.a), 0);
+  let vDone = 0, aDone = 0;
+  const tick = () => report(`${Math.min(99, Math.floor(Math.min(vt ? vDone : total, at ? aDone : total) / total * 100))}%`);
+
+  let vsrc = null, asrc = null;
+  if (vt) {
+    const width = await vt.getCodedWidth(), height = await vt.getCodedHeight();
+    const codec = await getFirstEncodableVideoCodec(VIDEO_CODECS, { width, height });
+    if (!codec) throw new Error("이 기기에서 H.264/HEVC 인코딩을 지원하지 않습니다.");
+    vsrc = new VideoSampleSource({ codec, quality: QUALITY_HIGH, keyFrameInterval: 1 });
+    output.addVideoTrack(vsrc, { rotation: await vt.getRotation(), frameRate: env.fps });
+  }
+  if (at) {
+    const numberOfChannels = await at.getNumberOfChannels(), sampleRate = await at.getSampleRate();
+    if (!(await canEncodeAudio("aac", { numberOfChannels, sampleRate }))) {
+      const { registerAacEncoder } = await import("@mediabunny/aac-encoder");
+      registerAacEncoder();
+    }
+    asrc = new AudioSampleSource({ codec: "aac", quality: QUALITY_HIGH });
+    output.addAudioTrack(asrc);
+  }
+  await output.start();
+
+  const videoPump = async () => {
+    const sink = new VideoSampleSink(vt);
+    for (const seg of segments) {
+      for await (const s of sink.samples(seg.a, seg.b)) {
+        const st = Math.max(seg.a, s.timestamp), en = Math.min(seg.b, s.timestamp + s.duration);
+        if (en <= st) { s.close(); continue; }
+        s.setTimestamp(seg.o + (st - seg.a));
+        s.setDuration(en - st);
+        await vsrc.add(s);
+        s.close();
+        vDone = s.timestamp + s.duration; tick();
+      }
+    }
+    vsrc.close();
+  };
+  const audioPump = async () => {
+    const sink = new AudioSampleSink(at);
+    for (const seg of segments) {
+      for await (const s of sink.samples(seg.a, seg.b)) {
+        const sr = s.sampleRate;
+        const from = Math.max(0, Math.round((seg.a - s.timestamp) * sr));
+        const to = Math.min(s.numberOfFrames, Math.round((seg.b - s.timestamp) * sr));
+        if (to <= from) { s.close(); continue; }
+        let x = s;
+        if (from > 0 || to < s.numberOfFrames) { x = s.trim(from, to); s.close(); }
+        x.setTimestamp(seg.o + Math.max(0, x.timestamp - seg.a));
+        await asrc.add(x);
+        x.close();
+        aDone = x.timestamp + x.duration; tick();
+      }
+    }
+    asrc.close();
+  };
+  await Promise.all([vt ? videoPump() : null, at ? audioPump() : null]);
+  await output.finalize();
+  return new Blob([output.target.buffer], { type: "video/mp4" });
+}
+
+// ---------- 파형 그리기 ----------
+function draw() {
+  const cv = $("wave"), dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  const css = getComputedStyle(document.documentElement);
+  const env = state.env ?? exampleEnv;
+  const { db, duration } = env;
+  const lo = -70, hi = 0;
+  const y = (v) => h - 4 - (Math.min(hi, Math.max(lo, v)) - lo) / (hi - lo) * (h - 8);
+  // 잘릴 구간
+  g.fillStyle = css.getPropertyValue("--line");
+  for (const [a, b] of state.cuts) g.fillRect(a / duration * w, 0, Math.max(1, (b - a) / duration * w), h);
+  // 음량: 픽셀 열마다 최대값
+  g.fillStyle = css.getPropertyValue("--fg");
+  const per = db.length / w;
+  for (let x = 0; x < w; x++) {
+    let m = -100;
+    const s = Math.floor(x * per), e = Math.max(s + 1, Math.floor((x + 1) * per));
+    for (let i = s; i < e && i < db.length; i++) if (db[i] > m) m = db[i];
+    const top = y(m);
+    g.globalAlpha = 0.85;
+    g.fillRect(x, top, 1, h - 4 - top);
+  }
+  g.globalAlpha = 1;
+  // 기준선
+  g.fillStyle = css.getPropertyValue("--accent");
+  g.fillRect(0, Math.round(y(+$("thr").value)), w, 1);
+}
+
+// 파일을 고르기 전에 보여줄 예시 파형 (말 - 쉼 반복)
+const exampleEnv = (() => {
+  const duration = 84, n = Math.ceil(duration / WIN);
+  const db = new Float32Array(n);
+  let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  let t = 0, speaking = true;
+  while (t < n) {
+    const len = Math.floor((speaking ? 2.5 + rnd() * 5 : 0.3 + rnd() * 2.2) / WIN);
+    for (let i = t; i < Math.min(n, t + len); i++) db[i] = speaking ? -24 + rnd() * 16 - (rnd() < .08 ? 20 : 0) : -58 + rnd() * 8;
+    t += len; speaking = !speaking;
+  }
+  return { db, duration, fps: 30 };
+})();
+
+function recompute() {
+  const thr = +$("thr").value, minSil = +$("minSil").value, pad = +$("pad").value;
+  $("thrV").textContent = `${thr} dB`;
+  $("minSilV").textContent = `${minSil.toFixed(2)} s`;
+  $("padV").textContent = `${pad.toFixed(2)} s`;
+  const env = state.env ?? exampleEnv;
+  const r = detect(env, thr, minSil, pad);
+  state.segments = r.segments;
+  // 화면의 회색 구간 = 실제로 버려지는 부분 (남길 구간의 여집합)
+  const gaps = []; let cur = 0;
+  for (const s of r.segments) { if (s.a > cur) gaps.push([cur, s.a]); cur = s.b; }
+  if (env.duration > cur) gaps.push([cur, env.duration]);
+  state.cuts = gaps;
+  const removed = env.duration - r.outDuration;
+  $("sSrc").textContent = fmt(env.duration); $("sSrcD").textContent = `${env.duration.toFixed(1)} s`;
+  $("sOut").textContent = fmt(r.outDuration); $("sOutD").textContent = `${r.outDuration.toFixed(1)} s`;
+  $("sCut").textContent = `${gaps.length}곳`;
+  $("sCutD").textContent = `${removed.toFixed(1)} s · ${Math.round(removed / env.duration * 100)}%`;
+  draw();
+  if (state.env) {
+    if (state.blob) { state.blob = null; $("saveBtn").hidden = true; step("render", ""); step("save", ""); }
+    step("silence", "done", `${r.segments.length}조각`);
+  }
+}
+
+// ---------- 미리보기: 잘린 구간 건너뛰기 ----------
+const video = $("video");
+function skipCuts() {
+  if (!$("skip").checked || !state.env || video.paused) return;
+  const t = video.currentTime;
+  const seg = state.segments.find((s) => t < s.b);
+  if (!seg) { video.pause(); return; }
+  if (t < seg.a - 0.02) video.currentTime = seg.a;
+}
+video.addEventListener("timeupdate", skipCuts);
+video.addEventListener("play", skipCuts);
+if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+  const loop = () => { skipCuts(); video.requestVideoFrameCallback(loop); };
+  video.requestVideoFrameCallback(loop);
+}
+
+// ---------- 흐름 ----------
+async function load(file) {
+  if (state.busy || !file) return;
+  state.file = file; state.env = null; state.blob = null;
+  $("saveBtn").hidden = true;
+  for (const k of ["decode", "silence", "render", "save"]) step(k, "");
+  $("fileName").textContent = file.name;
+  $("fileMeta").textContent = `${(file.size / 1024 / 1024).toFixed(1)} MB`;
+  $("exampleTag").hidden = true;
+  if (state.url) URL.revokeObjectURL(state.url);
+  state.url = URL.createObjectURL(file);
+  video.src = state.url;
+  $("previewCard").hidden = false;
+  setBusy(true); setMsg("오디오를 분석하는 중입니다.");
+  try {
+    const [env, ms] = await timed("decode", (rep) => analyze(file, rep));
+    state.env = env;
+    step("decode", "done", `${(ms / 1000).toFixed(1)} s`);
+    const meta = [env.width && `${env.width}×${env.height}`, `${env.fps.toFixed(2)} fps`, fmt(env.duration), `${(file.size / 1024 / 1024).toFixed(1)} MB`].filter(Boolean);
+    $("fileMeta").textContent = meta.join(" · ");
+    await timed("silence", async () => recompute());
+    recompute();
+    setMsg("미리보기로 컷을 확인하고, 기준을 조절한 뒤 MP4를 만드세요.");
+  } catch (e) {
+    console.error(e);
+    step("decode", "err", "실패");
+    setMsg(e.message || String(e), true);
+  } finally { setBusy(false); }
+}
+
+async function doRender() {
+  if (!state.env || state.busy) return;
+  setBusy(true); keepAwake(true);
+  setMsg("렌더링 중입니다. 화면을 켜 두세요.");
+  try {
+    const [blob, ms] = await timed("render", (rep) => render(state.file, state.segments, state.env, rep));
+    state.blob = blob;
+    step("render", "done", `${(ms / 1000).toFixed(1)} s`);
+    step("save", "done", `${(blob.size / 1024 / 1024).toFixed(1)} MB`);
+    $("saveBtn").hidden = false;
+    setMsg("완료. 저장한 뒤 CapCut에서 재생해 확인하세요.");
+  } catch (e) {
+    console.error(e);
+    step("render", "err", "실패");
+    setMsg(`렌더링 실패: ${e.message || e}`, true);
+  } finally { keepAwake(false); setBusy(false); }
+}
+
+function outName() { return (state.file?.name.replace(/\.[^.]+$/, "") || "video") + "_jumpcut.mp4"; }
+
+async function save() {
+  if (!state.blob) return;
+  const name = outName();
+  // claude.ai 에 올린 페이지: 플랫폼 저장 기능 (iOS 앱에서는 공유 시트)
+  const downloads = window.claude?.use ? await window.claude.use("downloads").catch(() => null) : null;
+  if (downloads) {
+    try { await downloads.save({ filename: name, data: state.blob }); setMsg("저장했습니다. CapCut에서 새 프로젝트로 불러오세요."); }
+    catch (e) { if (e?.code !== "declined") setMsg(`저장 실패: ${e?.message || e?.code}`, true); }
+    return;
+  }
+  // 일반 브라우저: iPad 공유 시트 → '비디오 저장' 또는 CapCut 으로 바로 보내기
+  const file = new File([state.blob], name, { type: "video/mp4" });
+  if (navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file] }); return; } catch (e) { if (e?.name === "AbortError") return; }
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(state.blob); a.download = name;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+}
+
+// ---------- 이벤트 ----------
+$("file").addEventListener("change", (e) => load(e.target.files[0]));
+const drop = $("drop");
+["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach((t) => drop.addEventListener(t, () => drop.classList.remove("over")));
+drop.addEventListener("drop", (e) => { e.preventDefault(); load(e.dataTransfer.files[0]); });
+["thr", "minSil", "pad"].forEach((id) => $(id).addEventListener("input", recompute));
+$("renderBtn").addEventListener("click", doRender);
+$("saveBtn").addEventListener("click", save);
+window.addEventListener("resize", draw);
+
+// 엔진 확인: 이 기기에서 H.264 인코딩이 되는지
+(async () => {
+  const ok = typeof VideoEncoder !== "undefined" && !!(await getFirstEncodableVideoCodec(VIDEO_CODECS, { width: 1920, height: 1080 }).catch(() => null));
+  $("engineChip").textContent = ok ? "WebCodecs 사용 가능" : "이 브라우저는 인코딩 불가";
+  $("engineChip").className = "chip" + (ok ? " on" : "");
+  if (!ok) setMsg("이 브라우저는 영상 인코딩(WebCodecs)을 지원하지 않습니다. iPadOS 17 이상의 Safari를 사용하세요.", true);
+})();
+recompute();
+window.__capcutAgent = { state, load, doRender, detect };  // 테스트용
+</script>
