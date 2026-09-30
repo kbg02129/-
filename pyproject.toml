@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "capcut-agent"
+version = "0.1.0"
+description = "무음·버벅임 자동 컷 편집과 자막 생성을 해주는 CapCut 편집 도우미"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+whisper = ["faster-whisper>=1.0"]
+llm = ["anthropic>=1.0"]
+all = ["faster-whisper>=1.0", "anthropic>=1.0"]
+dev = ["pytest>=8", "imageio-ffmpeg"]
+
+[project.scripts]
+capcut-agent = "capcut_agent.cli:main"
+
+[tool.setuptools]
+packages = ["capcut_agent"]
